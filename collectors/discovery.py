@@ -353,7 +353,10 @@ def discover_from_edgar(state: str, max_companies: int = 25) -> Tuple[List[Disco
 
             # State filter — keep if incorporated/located in target state
             # Also keep if state unknown (EDGAR state data is inconsistent)
-            filing_state = detect_state(inc_states) if inc_states else None
+            # inc_states can be a list or string depending on EDGAR response
+            if isinstance(inc_states, list):
+                inc_states = " ".join(inc_states)
+            filing_state = detect_state(str(inc_states)) if inc_states else None
             if filing_state and filing_state != state:
                 continue  # Skip companies clearly HQ'd elsewhere
 
