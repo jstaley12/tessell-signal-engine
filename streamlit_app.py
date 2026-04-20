@@ -196,9 +196,13 @@ with st.sidebar:
                                    default=["HOT","WARM","WATCHLIST","SIGNAL PENDING","BASE FIT ONLY"])
     min_score    = st.slider("Min Score", 0, 100, 0)
     st.markdown("---")
-    page = st.radio("View", ["🏆 Territory Rankings","🔍 Account Detail",
-                              "🔬 Run Live Scan","📊 Source Quality"],
-                    label_visibility="collapsed")
+    page = st.radio("View", [
+        "🗺️ Territory Discovery",
+        "🏆 Saved Rankings",
+        "🔍 Account Detail",
+        "🔬 Scan Known Accounts",
+        "📊 Source Quality",
+    ], label_visibility="collapsed")
 
 if preset_choice != "— choose —":
     p = PRESET_FILTERS[preset_choice]
@@ -227,7 +231,446 @@ df = df.sort_values("total_score", ascending=False).reset_index(drop=True)
 # ════════════════════════════════════════════════════════════════════
 # TERRITORY RANKINGS
 # ════════════════════════════════════════════════════════════════════
-if "Rankings" in page:
+# ════════════════════════════════════════════════════════════════════
+# TERRITORY DISCOVERY  — autonomous company discovery from live signals
+# ════════════════════════════════════════════════════════════════════
+if "Territory Discovery" in page:
+    st.markdown("### 🗺️ Territory Discovery")
+    st.markdown(
+        "Autonomously discovers enterprise companies from live public signals. "
+        "No pre-loaded list required — select a state and let the engine find accounts you don't already know."
+    )
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        disc_state  = st.selectbox("Target State",
+                                    ["TX","OK","KS","AR","MO","CO","LA","AZ","NM","TN","IN","MN"])
+    with col2:
+        disc_max    = st.slider("Max companies to discover", 10, 100, 40)
+    with col3:
+        disc_seeds  = st.checkbox("Include known anchors", value=True,
+                                   help="Always include known Fortune-tier companies for this state")
+
+    with st.expander("🔑 Optional API keys — add for richer discovery"):
+        st.markdown("""
+**Tier 2 — Free:**
+- **NewsAPI** ([newsapi.org](https://newsapi.org)) — 100 req/day, US business news  
+
+**Tier 3 — Paid (best coverage):**
+- **SerpAPI** ([serpapi.com](https://serpapi.com)) — ~$50/mo, Google Jobs structured data — *best job discovery*
+- **Bing Search** (Azure portal) — ~$3-7/1000 queries, structured web search
+
+Add keys to Streamlit secrets (`Manage app → Secrets`) for persistent use.
+        """)
+        col_k1, col_k2, col_k3 = st.columns(3)
+        with col_k1:
+            newsapi_key  = st.text_input("NewsAPI Key",  type="password", placeholder="free at newsapi.org")
+        with col_k2:
+            serpapi_key  = st.text_input("SerpAPI Key",  type="password", placeholder="serpapi.com")
+        with col_k3:
+            bing_api_key = st.text_input("Bing Search Key", type="password", placeholder="Azure portal")
+
+    # Also check Streamlit secrets for pre-configured keys
+    try:
+        newsapi_key  = newsapi_key  or st.secrets.get("NEWSAPI_KEY","")
+        serpapi_key  = serpapi_key  or st.secrets.get("SERPAPI_KEY","")
+        bing_api_key = bing_api_key or st.secrets.get("BING_API_KEY","")
+    except Exception:
+        pass
+
+    if st.button(f"🚀 Discover Companies in {disc_state}", type="primary"):
+        disc_progress = st.progress(0)
+        disc_status   = st.empty()
+
+        try:
+            from collectors.discovery import discover_territory
+            from collectors.live_collectors import collect_all
+            from collectors.fetcher import FetchLog
+            from scoring.scorer import (TessellScorer, enterprise_gate,
+                                        detect_hiring_states, extract_states_from_text)
+            scorer_obj = TessellScorer()
+            DB_TECH = {"oracle","sql server","postgresql","postgres","mysql",
+                       "mongodb","aurora","rds","azure sql","db2","mariadb"}
+
+            disc_status.markdown(f"🔍 Running discovery sources for **{disc_state}**...")
+            disc_progress.progress(0.1)
+
+            disc_result = discover_territory(
+                state=disc_state,
+                max_companies=disc_max,
+                include_seeds=disc_seeds,
+                newsapi_key=newsapi_key  or None,
+                serpapi_key=serpapi_key  or None,
+                bing_api_key=bing_api_key or None,
+            )
+            disc_progress.progress(0.40)
+
+            companies_found   = disc_result["companies"]
+            source_counts     = disc_result["source_counts"]
+            duplicates_removed= disc_result.get("duplicates_removed", 0)
+            before_dedup      = disc_result.get("before_dedup", len(companies_found))
+
+            disc_status.markdown(
+                f"✅ Found **{len(companies_found)} companies**. Now scoring..."
+            )
+
+            # Score every discovered company
+            results_store = []
+            for i, co in enumerate(companies_found):
+                disc_progress.progress(0.40 + (i / max(len(companies_found),1)) * 0.55)
+
+                name = co.name
+
+                # Optionally collect a few more signals via news queries
+                extra_signals = []
+                try:
+                    FetchLog.reset()
+                    extra = collect_all(
+                        company=name,
+                        news_terms=[f"Oracle {name}", f"database {name}",
+                                    f"cloud migration {name}"],
+                    )
+                    extra_signals = extra["signals"]
+                except Exception:
+                    pass
+
+                all_sigs = co.signals + extra_signals
+                all_text = " ".join(
+                    (s.raw_snippet if hasattr(s,"raw_snippet") else s.get("raw_snippet",""))
+                    for s in all_sigs
+                )
+
+                sc_sigs = []
+                for s in all_sigs:
+                    d  = s.to_dict() if hasattr(s,"to_dict") else s
+                    kw = d.get("extracted_keywords",[])
+                    sc_sigs.append({
+                        "raw_title":    d.get("raw_snippet","")[:100],
+                        "raw_excerpt":  d.get("raw_snippet",""),
+                        "source_type":  d.get("source_type",""),
+                        "signal_category": d.get("signal_type",""),
+                        "keywords_matched": kw,
+                        "database_technologies_mentioned": [k for k in kw if k in DB_TECH],
+                        "signal_state": d.get("state_detected"),
+                        "signal_city":  d.get("city_detected"),
+                        "signal_date":  d.get("date_found"),
+                        "confidence":   d.get("confidence_score",0.7),
+                        "signal_strength": "strong" if d.get("confidence_score",0)>=0.85 else "moderate",
+                    })
+
+                gate = enterprise_gate(
+                    company_name=name,
+                    estimated_employees=co.estimated_employees,
+                    all_text=all_text,
+                    known_public=co.is_public,
+                    known_fortune_rank=co.fortune_rank,
+                )
+
+                hq_state      = co.hq_state or disc_state
+                hiring_states = detect_hiring_states(sc_sigs)
+                text_states   = extract_states_from_text(all_text)
+                office_states = [s for s in text_states if s != hq_state]
+                signal_states = list(set(
+                    (s.state_detected if hasattr(s,"state_detected") else s.get("state_detected"))
+                    for s in all_sigs
+                    if (s.state_detected if hasattr(s,"state_detected") else s.get("state_detected"))
+                ))
+
+                if gate.passes:
+                    r = scorer_obj.score(
+                        company_name=name, signals=sc_sigs,
+                        enterprise_gate_result=gate,
+                        hq_state=hq_state, office_states=office_states,
+                        hiring_states=hiring_states, signal_states=signal_states,
+                        target_states=[disc_state], industry=co.industry or "",
+                    )
+                    scores = {
+                        "fit_score":r.fit.capped,"pain_score":r.pain.capped,
+                        "timing_score":r.timing.capped,"territory_score":r.territory.capped,
+                        "total_score":r.total_score,"meeting_propensity":r.meeting_propensity,
+                        "heat_level":r.heat_level,"surfaced":r.surfaced,
+                        "surface_reason":r.surface_reason,"score_evidence":r.score_notes,
+                    }
+                else:
+                    scores = {
+                        "fit_score":0,"pain_score":0,"timing_score":0,"territory_score":0,
+                        "total_score":0,"meeting_propensity":0,"heat_level":"COLD",
+                        "surfaced":False,
+                        "surface_reason":f"Did not pass enterprise gate: {gate.reason}",
+                        "score_evidence":[],
+                    }
+
+                from collectors.discovery import classify_discovery_type, why_discovered as _why, tessell_relevance_reason as _tessell
+                disc_type       = classify_discovery_type(co.discovery_source)
+                why_disc        = _why(co.discovery_source, all_sigs)
+                tessell_reason  = _tessell(all_sigs)
+
+                results_store.append({
+                    "company_name":      name,
+                    "hq_state":          hq_state,
+                    "hq_city":           co.hq_city or "",
+                    "industry":          co.industry or "Unknown",
+                    "is_public":         co.is_public,
+                    "ticker":            co.ticker or "",
+                    "fortune_rank":      co.fortune_rank,
+                    "discovery_source":  co.discovery_source,
+                    "discovery_type":    disc_type,
+                    "why_discovered":    why_disc,
+                    "tessell_relevance": tessell_reason,
+                    "live_signals":      len(all_sigs),
+                    "enterprise_gate":   {
+                        "passes":gate.passes,"tier":gate.tier,"reason":gate.reason
+                    },
+                    "scores":  scores,
+                    "signals": [s.to_dict() if hasattr(s,"to_dict") else s
+                                for s in all_sigs[:10]],
+                })
+
+            disc_progress.progress(1.0)
+            results_store.sort(key=lambda x: x["scores"]["total_score"], reverse=True)
+
+            hot_n        = sum(1 for r in results_store if r["scores"]["heat_level"]=="HOT")
+            warm_n       = sum(1 for r in results_store if r["scores"]["heat_level"]=="WARM")
+            gate_passed  = sum(1 for r in results_store if r["enterprise_gate"]["passes"])
+            gate_failed  = len(results_store) - gate_passed
+            live_disc_n  = sum(1 for r in results_store if r["discovery_type"]=="live_discovered")
+            seed_only_n  = sum(1 for r in results_store if r["discovery_type"]=="fallback_seed")
+            mixed_n      = sum(1 for r in results_store if r["discovery_type"]=="mixed_source")
+            live_sigs    = sum(r["live_signals"] for r in results_store)
+            surfaced_n   = sum(1 for r in results_store if r["scores"].get("surfaced"))
+            disc_status.markdown("✅ **Discovery complete!**")
+
+            # ── Discovery diagnostics panel ────────────────────────
+            st.markdown("---")
+            st.markdown("#### 📊 Discovery Diagnostics")
+
+            d1,d2,d3,d4,d5 = st.columns(5)
+            d1.metric("Raw found",        before_dedup)
+            d2.metric("Duplicates removed",duplicates_removed)
+            d3.metric("After dedup",      len(results_store))
+            d4.metric("Passed gate",      gate_passed)
+            d5.metric("Rejected (gate)",  gate_failed)
+
+            d6,d7,d8,d9,d10 = st.columns(5)
+            d6.metric("🟢 Live discovered", live_disc_n)
+            d7.metric("🟡 Mixed (seed+live)",mixed_n)
+            d8.metric("⬜ Seed only",       seed_only_n)
+            d9.metric("Live signals total", live_sigs)
+            d10.metric("Surfaced (≥55)",    surfaced_n)
+
+            # Per-source breakdown table
+            st.markdown("**Companies found per source:**")
+            src_rows = []
+            for src, cnt in source_counts.items():
+                src_rows.append({
+                    "Source":        src.replace("_"," ").title(),
+                    "Companies found": cnt,
+                    "Type": "Live signal" if src != "state_seeds" else "Seed list",
+                })
+            import pandas as pd
+            st.dataframe(pd.DataFrame(src_rows), use_container_width=True, hide_index=True)
+
+            if live_sigs == 0:
+                st.warning(
+                    "**0 live signals collected.** "
+                    "Google News RSS and Indeed are either rate-limited or returned no "
+                    "relevant content for this state right now. "
+                    "Scores show Enterprise Fit + Territory only. "
+                    "Try: (1) run again in a few minutes, (2) add a free NewsAPI key above, "
+                    "or (3) check Source Quality tab for HTTP status details."
+                )
+            else:
+                st.success(f"**{live_sigs} live signals collected across {gate_passed} enterprise-qualified companies**")
+
+            st.markdown("---")
+            st.markdown(f"#### Top Targets — {disc_state}")
+            st.caption(
+                "🟢 **Live discovered** = found from live signals this session  "
+                "🟡 **Mixed** = known anchor + live signals confirmed  "
+                "⬜ **Seed only** = known enterprise anchor, no live signals yet"
+            )
+
+            for row in results_store[:30]:
+                sc       = row["scores"]
+                heat     = display_heat(sc["heat_level"], row["live_signals"])
+                color    = HEAT_COLOR.get(heat, "#6B7280")
+                emoji    = HEAT_EMOJI.get(heat, "⬜")
+                bg       = HEAT_BG.get(heat, "#161B22")
+                score    = sc["total_score"]
+                buyers   = BUYER_TITLES.get(row["industry"],
+                             ["VP Infrastructure","Director Database Engineering","CIO"])
+                urgency  = urgency_explanation(sc["heat_level"], row["live_signals"], score)
+                fit_pct  = int(sc["fit_score"]  / 40 * 100)
+                pain_pct = int(sc["pain_score"] / 40 * 100)
+                time_pct = int(sc["timing_score"]/ 20 * 100)
+                terr_pct = int(sc["territory_score"]/ 20 * 100)
+
+                # Discovery type — visual distinction
+                disc_type = row.get("discovery_type","fallback_seed")
+                if disc_type == "live_discovered":
+                    disc_label = "🟢 Live discovered"
+                    disc_color = "#3FB950"
+                    disc_bg    = "#0D2A1A"
+                elif disc_type == "mixed_source":
+                    disc_label = "🟡 Live + known anchor"
+                    disc_color = "#EAB308"
+                    disc_bg    = "#2B2600"
+                else:
+                    disc_label = "⬜ Known anchor"
+                    disc_color = "#6E7681"
+                    disc_bg    = "#161B22"
+
+                # Source badges
+                src_badges = "".join(
+                    f"<span style='font-size:0.62rem;color:#8B949E;background:#21262D;"
+                    f"padding:1px 6px;border-radius:10px;margin-right:3px;'>"
+                    f"{s.replace('_',' ').replace('state seed list','seed').title()}</span>"
+                    for s in set(row["discovery_source"].split("+")) if s
+                )
+
+                why_disc_text    = row.get("why_discovered", "")
+                tessell_rel_text = row.get("tessell_relevance", "")
+                gate_tier        = row["enterprise_gate"]["tier"].replace("_"," ").title()
+                score_evid       = sc.get("score_evidence", [])
+                frank            = f" · F{row['fortune_rank']}" if row.get("fortune_rank") else ""
+                tick_str         = f"&nbsp;·&nbsp; {row['ticker']}" if row.get("ticker") else ""
+
+                st.markdown(f"""
+<div style='background:{bg};border:1px solid {color}33;border-left:3px solid {color};
+            border-radius:8px;padding:14px 18px;margin-bottom:10px;'>
+
+  <div style='display:flex;justify-content:space-between;align-items:flex-start;'>
+    <div style='flex:1;'>
+      <div style='display:flex;align-items:center;gap:8px;margin-bottom:4px;flex-wrap:wrap;'>
+        <span style='font-size:1rem;font-weight:600;color:#E6EDF3;'>{emoji} {row["company_name"]}</span>
+        <span style='font-size:0.7rem;color:#8B949E;background:#21262D;padding:2px 7px;border-radius:20px;'>{row["industry"]}</span>
+        <span style='font-size:0.7rem;color:{color};border:1px solid {color}55;padding:2px 7px;border-radius:20px;font-weight:600;'>{heat}</span>
+        <span style='font-size:0.68rem;color:{disc_color};background:{disc_bg};border:1px solid {disc_color}44;padding:1px 7px;border-radius:20px;'>{disc_label}</span>
+      </div>
+      <div style='font-size:0.76rem;color:#8B949E;'>
+        📍 {row["hq_city"] + ", " if row["hq_city"] else ""}{row["hq_state"]}
+        &nbsp;·&nbsp; {gate_tier}{frank}
+        &nbsp;·&nbsp; {row["live_signals"]} signals
+        {tick_str}
+        &nbsp; {src_badges}
+      </div>
+    </div>
+    <div style='text-align:right;min-width:65px;'>
+      <div style='font-size:2rem;font-weight:700;font-family:"IBM Plex Mono",monospace;color:{color};line-height:1;'>{score:.0f}</div>
+      <div style='font-size:0.62rem;color:#6E7681;'>/ 100</div>
+    </div>
+  </div>
+
+  <div style='margin-top:10px;display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:5px 16px;'>
+    <div><div style='display:flex;justify-content:space-between;font-size:0.68rem;margin-bottom:2px;'><span style='color:#6E7681;'>Fit</span><span style='color:#58A6FF;font-family:monospace;'>{sc["fit_score"]:.0f}/40</span></div><div style='background:#21262D;border-radius:2px;height:4px;'><div style='background:#58A6FF;width:{fit_pct}%;height:4px;border-radius:2px;'></div></div></div>
+    <div><div style='display:flex;justify-content:space-between;font-size:0.68rem;margin-bottom:2px;'><span style='color:#6E7681;'>Pain</span><span style='color:#BC8CFF;font-family:monospace;'>{sc["pain_score"]:.0f}/40</span></div><div style='background:#21262D;border-radius:2px;height:4px;'><div style='background:#BC8CFF;width:{pain_pct}%;height:4px;border-radius:2px;'></div></div></div>
+    <div><div style='display:flex;justify-content:space-between;font-size:0.68rem;margin-bottom:2px;'><span style='color:#6E7681;'>Timing</span><span style='color:#3FB950;font-family:monospace;'>{sc["timing_score"]:.0f}/20</span></div><div style='background:#21262D;border-radius:2px;height:4px;'><div style='background:#3FB950;width:{time_pct}%;height:4px;border-radius:2px;'></div></div></div>
+    <div><div style='display:flex;justify-content:space-between;font-size:0.68rem;margin-bottom:2px;'><span style='color:#6E7681;'>Territory</span><span style='color:#F97316;font-family:monospace;'>{sc["territory_score"]:.0f}/20</span></div><div style='background:#21262D;border-radius:2px;height:4px;'><div style='background:#F97316;width:{terr_pct}%;height:4px;border-radius:2px;'></div></div></div>
+  </div>
+
+  <div style='margin-top:10px;padding-top:8px;border-top:1px solid #21262D;
+              display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:0.71rem;'>
+    <div>
+      <div style='color:#6E7681;margin-bottom:2px;'>Why discovered</div>
+      <div style='color:#C9D1D9;'>{why_disc_text or "Known enterprise anchor"}</div>
+    </div>
+    <div>
+      <div style='color:#6E7681;margin-bottom:2px;'>Enterprise qualification</div>
+      <div style='color:#C9D1D9;'>{gate_tier}{frank}</div>
+    </div>
+    <div>
+      <div style='color:#6E7681;margin-bottom:2px;'>Tessell relevance</div>
+      <div style='color:{"#3FB950" if tessell_rel_text and "No live" not in tessell_rel_text else "#8B949E"};'>
+        {tessell_rel_text or "No live signals — run scan for signal details"}
+      </div>
+    </div>
+    <div>
+      <div style='color:#6E7681;margin-bottom:2px;'>Urgency</div>
+      <div style='color:#C9D1D9;'>{urgency}</div>
+    </div>
+  </div>
+
+  <div style='margin-top:6px;font-size:0.71rem;'>
+    <span style='color:#6E7681;'>Likely buyers: </span>
+    <span style='color:#C9D1D9;'>{" &nbsp;·&nbsp; ".join(buyers[:3])}</span>
+  </div>
+
+  {"".join(f'<div style=\"margin-top:3px;font-size:0.69rem;color:#8B949E;\">• {ev}</div>' for ev in score_evid[:2]) if score_evid else ""}
+</div>""", unsafe_allow_html=True)
+
+            # Exports
+            st.markdown("---")
+            export_rows = [{
+                "company":           r["company_name"],
+                "hq_state":          r["hq_state"],
+                "industry":          r["industry"],
+                "total_score":       r["scores"]["total_score"],
+                "heat":              display_heat(r["scores"]["heat_level"], r["live_signals"]),
+                "fit":               r["scores"]["fit_score"],
+                "pain":              r["scores"]["pain_score"],
+                "timing":            r["scores"]["timing_score"],
+                "territory":         r["scores"]["territory_score"],
+                "meeting_propensity":r["scores"]["meeting_propensity"],
+                "live_signals":      r["live_signals"],
+                "discovery_source":  r["discovery_source"],
+                "gate_tier":         r["enterprise_gate"]["tier"],
+            } for r in results_store]
+
+            c1, c2 = st.columns(2)
+            c1.download_button(
+                "⬇ Export CSV",
+                data=pd.DataFrame(export_rows).to_csv(index=False),
+                file_name=f"tessell_discovery_{disc_state}_{datetime.now().strftime('%Y%m%d')}.csv",
+                mime="text/csv",
+            )
+            disc_json = {
+                "run_metadata": {
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "target_state": disc_state,
+                    "companies_discovered": len(results_store),
+                    "data_mode": "LIVE_DISCOVERY",
+                    "source_counts": source_counts,
+                },
+                "companies": [{
+                    "company_name":  r["company_name"],
+                    "industry":      r["industry"],
+                    "hq_state":      r["hq_state"],
+                    "hq_city":       r["hq_city"],
+                    "fortune_rank":  r["fortune_rank"],
+                    "employees":     None,
+                    "ticker":        r["ticker"] or None,
+                    "collection": {
+                        "live_signals_ingested": r["live_signals"],
+                        "total_raw": r["live_signals"],
+                        "false_positives_removed": 0,
+                        "per_source": {},
+                    },
+                    "enterprise_gate": r["enterprise_gate"],
+                    "geography": {
+                        "hq_state":               r["hq_state"],
+                        "detected_hiring_states":  [],
+                        "detected_office_states":  [],
+                        "signal_states":           [r["hq_state"]] if r["hq_state"] else [],
+                        "target_states":           [disc_state],
+                        "hq_in_territory":         r["hq_state"] == disc_state,
+                        "territory_presence":      [r["hq_state"]] if r["hq_state"]==disc_state else [],
+                    },
+                    "scores":  r["scores"],
+                    "signals": r["signals"],
+                } for r in results_store],
+            }
+            c2.download_button(
+                "⬇ Download proof_output.json",
+                data=json.dumps(disc_json, indent=2, default=str),
+                file_name="proof_output.json",
+                mime="application/json",
+            )
+
+        except Exception as e:
+            st.error(f"Discovery error: {e}")
+            st.exception(e)
+
+elif "Saved Rankings" in page:
     hot     = len(df_all[df_all["display_heat"]=="HOT"])
     warm    = len(df_all[df_all["display_heat"]=="WARM"])
     pending = len(df_all[df_all["display_heat"]=="SIGNAL PENDING"])
@@ -312,7 +755,7 @@ if "Rankings" in page:
 # ════════════════════════════════════════════════════════════════════
 # ACCOUNT DETAIL
 # ════════════════════════════════════════════════════════════════════
-elif "Detail" in page:
+elif "Account Detail" in page:
     names    = [r["company"] for r in all_rows]
     selected = st.selectbox("Select account", names)
     row      = next((r for r in all_rows if r["company"]==selected), None)
@@ -391,7 +834,7 @@ elif "Detail" in page:
 # ════════════════════════════════════════════════════════════════════
 # RUN LIVE SCAN  —  full per-source diagnostics
 # ════════════════════════════════════════════════════════════════════
-elif "Scan" in page:
+elif "Scan Known" in page:
     st.markdown("### 🔬 Run Live Signal Scan")
     st.markdown("Runs signal collection directly from Streamlit Cloud. Full per-source diagnostics shown after each scan.")
 
@@ -774,7 +1217,7 @@ elif "Scan" in page:
 # ════════════════════════════════════════════════════════════════════
 # SOURCE QUALITY
 # ════════════════════════════════════════════════════════════════════
-elif "Source" in page:
+elif "Source Quality" in page:
     st.markdown("### 📊 Source Quality")
     fetch_log  = active_data.get("run_metadata",{}).get("fetch_log",{})
     by_status  = fetch_log.get("by_status",{}) if fetch_log else {}
