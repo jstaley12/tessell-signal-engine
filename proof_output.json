@@ -1,0 +1,755 @@
+{
+  "run_metadata": {
+    "timestamp": "2026-04-19T23:13:31.813144",
+    "companies_run": 5,
+    "target_territory": [
+      "TX",
+      "OK",
+      "KS"
+    ],
+    "data_mode": "LIVE",
+    "log_file": "/home/claude/tessell-local/logs/run_20260419_231331.log",
+    "report_directory": "/home/claude/tessell-local/reports",
+    "elapsed_seconds": 10.9,
+    "fetch_log": {
+      "total_urls_tried": 40,
+      "by_status": {
+        "robots_blocked": 24,
+        "http_403": 10,
+        "no_slug": 5,
+        "connection_error": 1
+      },
+      "by_source": {
+        "careers_page": {
+          "tried": 5,
+          "success": 0,
+          "blocked": 5,
+          "failed": 0
+        },
+        "greenhouse": {
+          "tried": 5,
+          "success": 0,
+          "blocked": 0,
+          "failed": 5
+        },
+        "lever": {
+          "tried": 5,
+          "success": 0,
+          "blocked": 0,
+          "failed": 5
+        },
+        "newsroom": {
+          "tried": 5,
+          "success": 0,
+          "blocked": 4,
+          "failed": 1
+        },
+        "google_news_rss": {
+          "tried": 15,
+          "success": 0,
+          "blocked": 15,
+          "failed": 0
+        },
+        "sec_edgar": {
+          "tried": 5,
+          "success": 0,
+          "blocked": 0,
+          "failed": 5
+        }
+      },
+      "success_rate": 0.0
+    }
+  },
+  "companies": [
+    {
+      "company_name": "McKesson",
+      "industry": "Healthcare / Distribution",
+      "fortune_rank": 9,
+      "employees": 51000,
+      "hq_state": "TX",
+      "hq_city": "Irving",
+      "ticker": "MCK",
+      "collection": {
+        "elapsed_seconds": 0.4,
+        "total_raw": 0,
+        "false_positives_removed": 0,
+        "total_after_dedup": 0,
+        "live_signals_ingested": 0,
+        "per_source": {
+          "careers_page": {
+            "signals_returned": 0,
+            "access_status": "robots_blocked",
+            "total_fetched": null,
+            "noise_filtered": 0,
+            "strategy_used": null,
+            "limitation": null,
+            "proof_url": "https://www.mckesson.com/Careers/"
+          },
+          "greenhouse": {
+            "signals_returned": 0,
+            "access_status": "http_403",
+            "total_fetched": null,
+            "noise_filtered": 0,
+            "strategy_used": null,
+            "limitation": null,
+            "proof_url": "https://boards-api.greenhouse.io/v1/boards/mckesson/jobs?content=true"
+          },
+          "lever": {
+            "signals_returned": 0,
+            "access_status": "no_slug",
+            "total_fetched": null,
+            "noise_filtered": 0,
+            "strategy_used": null,
+            "limitation": null,
+            "proof_url": null
+          },
+          "newsroom": {
+            "signals_returned": 0,
+            "access_status": "robots_blocked",
+            "total_fetched": null,
+            "noise_filtered": 0,
+            "strategy_used": null,
+            "limitation": null,
+            "proof_url": "https://www.mckesson.com/About-McKesson/Newsroom/"
+          },
+          "google_news": {
+            "signals_returned": 0,
+            "access_status": null,
+            "total_fetched": 0,
+            "noise_filtered": 0,
+            "strategy_used": null,
+            "limitation": null,
+            "proof_url": null
+          },
+          "sec_edgar": {
+            "signals_returned": 0,
+            "access_status": "http_403",
+            "total_fetched": null,
+            "noise_filtered": 0,
+            "strategy_used": null,
+            "limitation": "filing index only; full 10-K/10-Q text parsing = Phase 3",
+            "proof_url": "https://efts.sec.gov/LATEST/search-index?q=%22Oracle+database%22&forms=10-K,10-Q&dateRange=custom&startdt=2024-01-01&entity=McKesson"
+          },
+          "conference": {
+            "signals_returned": 0,
+            "access_status": null,
+            "total_fetched": null,
+            "noise_filtered": 0,
+            "strategy_used": null,
+            "limitation": null,
+            "proof_url": null
+          }
+        }
+      },
+      "enterprise_gate": {
+        "passes": true,
+        "tier": "fortune_500",
+        "reason": "Fortune 500 company",
+        "confidence": 0.99
+      },
+      "geography": {
+        "hq_state": "TX",
+        "detected_hiring_states": [],
+        "detected_office_states": [],
+        "signal_states": [],
+        "target_states": [
+          "TX",
+          "OK",
+          "KS"
+        ],
+        "hq_in_territory": true,
+        "territory_presence": []
+      },
+      "scores": {
+        "fit_score": 21.0,
+        "pain_score": 0.0,
+        "timing_score": 0.0,
+        "territory_score": 8.0,
+        "total_score": 29.0,
+        "meeting_propensity": 10.1,
+        "heat_level": "COLD",
+        "surfaced": false,
+        "surface_reason": "Score 29 < threshold 55 (0 live signals \u2014 base score only)",
+        "score_evidence": [
+          "Enterprise tier (fortune_500): +15pts",
+          "Regulated industry (Healthcare / Distribution): +6pts",
+          "HQ in target territory (TX) +8pts"
+        ],
+        "fit_rules": [
+          {
+            "rule": "enterprise_tier",
+            "points": 15,
+            "evidence": "Tier: fortune_500 \u2192 15pts"
+          },
+          {
+            "rule": "regulated_industry",
+            "points": 6,
+            "evidence": "Industry: Healthcare / Distribution"
+          }
+        ],
+        "pain_rules": [],
+        "timing_rules": [],
+        "territory_rules": [
+          {
+            "rule": "hq_in_territory",
+            "points": 8,
+            "evidence": "HQ state TX is in target territory"
+          }
+        ]
+      },
+      "signals": []
+    },
+    {
+      "company_name": "AT&T",
+      "industry": "Telecommunications",
+      "fortune_rank": 13,
+      "employees": 160000,
+      "hq_state": "TX",
+      "hq_city": "Dallas",
+      "ticker": "T",
+      "collection": {
+        "elapsed_seconds": 2.7,
+        "total_raw": 0,
+        "false_positives_removed": 0,
+        "total_after_dedup": 0,
+        "live_signals_ingested": 0,
+        "per_source": {
+          "careers_page": {
+            "signals_returned": 0,
+            "access_status": "robots_blocked",
+            "total_fetched": null,
+            "noise_filtered": 0,
+            "strategy_used": null,
+            "limitation": null,
+            "proof_url": "https://www.att.jobs/search-jobs"
+          },
+          "greenhouse": {
+            "signals_returned": 0,
+            "access_status": "http_403",
+            "total_fetched": null,
+            "noise_filtered": 0,
+            "strategy_used": null,
+            "limitation": null,
+            "proof_url": "https://boards-api.greenhouse.io/v1/boards/att/jobs?content=true"
+          },
+          "lever": {
+            "signals_returned": 0,
+            "access_status": "no_slug",
+            "total_fetched": null,
+            "noise_filtered": 0,
+            "strategy_used": null,
+            "limitation": null,
+            "proof_url": null
+          },
+          "newsroom": {
+            "signals_returned": 0,
+            "access_status": "robots_blocked",
+            "total_fetched": null,
+            "noise_filtered": 0,
+            "strategy_used": null,
+            "limitation": null,
+            "proof_url": "https://about.att.com/story/2024/"
+          },
+          "google_news": {
+            "signals_returned": 0,
+            "access_status": null,
+            "total_fetched": 0,
+            "noise_filtered": 0,
+            "strategy_used": null,
+            "limitation": null,
+            "proof_url": null
+          },
+          "sec_edgar": {
+            "signals_returned": 0,
+            "access_status": "http_403",
+            "total_fetched": null,
+            "noise_filtered": 0,
+            "strategy_used": null,
+            "limitation": "filing index only; full 10-K/10-Q text parsing = Phase 3",
+            "proof_url": "https://efts.sec.gov/LATEST/search-index?q=%22Oracle+database%22&forms=10-K,10-Q&dateRange=custom&startdt=2024-01-01&entity=AT%26T"
+          },
+          "conference": {
+            "signals_returned": 0,
+            "access_status": null,
+            "total_fetched": null,
+            "noise_filtered": 0,
+            "strategy_used": null,
+            "limitation": null,
+            "proof_url": null
+          }
+        }
+      },
+      "enterprise_gate": {
+        "passes": true,
+        "tier": "fortune_500",
+        "reason": "Fortune 500 company",
+        "confidence": 0.99
+      },
+      "geography": {
+        "hq_state": "TX",
+        "detected_hiring_states": [],
+        "detected_office_states": [],
+        "signal_states": [],
+        "target_states": [
+          "TX",
+          "OK",
+          "KS"
+        ],
+        "hq_in_territory": true,
+        "territory_presence": []
+      },
+      "scores": {
+        "fit_score": 18.0,
+        "pain_score": 0.0,
+        "timing_score": 0.0,
+        "territory_score": 8.0,
+        "total_score": 26.0,
+        "meeting_propensity": 9.1,
+        "heat_level": "COLD",
+        "surfaced": false,
+        "surface_reason": "Score 26 < threshold 55 (0 live signals \u2014 base score only)",
+        "score_evidence": [
+          "Enterprise tier (fortune_500): +15pts",
+          "Regulated industry (Telecommunications): +3pts",
+          "HQ in target territory (TX) +8pts"
+        ],
+        "fit_rules": [
+          {
+            "rule": "enterprise_tier",
+            "points": 15,
+            "evidence": "Tier: fortune_500 \u2192 15pts"
+          },
+          {
+            "rule": "regulated_industry",
+            "points": 3,
+            "evidence": "Industry: Telecommunications"
+          }
+        ],
+        "pain_rules": [],
+        "timing_rules": [],
+        "territory_rules": [
+          {
+            "rule": "hq_in_territory",
+            "points": 8,
+            "evidence": "HQ state TX is in target territory"
+          }
+        ]
+      },
+      "signals": []
+    },
+    {
+      "company_name": "American Airlines",
+      "industry": "Airlines",
+      "fortune_rank": 69,
+      "employees": 95000,
+      "hq_state": "TX",
+      "hq_city": "Fort Worth",
+      "ticker": "AAL",
+      "collection": {
+        "elapsed_seconds": 2.8,
+        "total_raw": 0,
+        "false_positives_removed": 0,
+        "total_after_dedup": 0,
+        "live_signals_ingested": 0,
+        "per_source": {
+          "careers_page": {
+            "signals_returned": 0,
+            "access_status": "robots_blocked",
+            "total_fetched": null,
+            "noise_filtered": 0,
+            "strategy_used": null,
+            "limitation": null,
+            "proof_url": "https://jobs.aa.com/"
+          },
+          "greenhouse": {
+            "signals_returned": 0,
+            "access_status": "http_403",
+            "total_fetched": null,
+            "noise_filtered": 0,
+            "strategy_used": null,
+            "limitation": null,
+            "proof_url": "https://boards-api.greenhouse.io/v1/boards/aa/jobs?content=true"
+          },
+          "lever": {
+            "signals_returned": 0,
+            "access_status": "no_slug",
+            "total_fetched": null,
+            "noise_filtered": 0,
+            "strategy_used": null,
+            "limitation": null,
+            "proof_url": null
+          },
+          "newsroom": {
+            "signals_returned": 0,
+            "access_status": "robots_blocked",
+            "total_fetched": null,
+            "noise_filtered": 0,
+            "strategy_used": null,
+            "limitation": null,
+            "proof_url": "https://news.aa.com/"
+          },
+          "google_news": {
+            "signals_returned": 0,
+            "access_status": null,
+            "total_fetched": 0,
+            "noise_filtered": 0,
+            "strategy_used": null,
+            "limitation": null,
+            "proof_url": null
+          },
+          "sec_edgar": {
+            "signals_returned": 0,
+            "access_status": "http_403",
+            "total_fetched": null,
+            "noise_filtered": 0,
+            "strategy_used": null,
+            "limitation": "filing index only; full 10-K/10-Q text parsing = Phase 3",
+            "proof_url": "https://efts.sec.gov/LATEST/search-index?q=%22Oracle+database%22&forms=10-K,10-Q&dateRange=custom&startdt=2024-01-01&entity=American+Airlines"
+          },
+          "conference": {
+            "signals_returned": 0,
+            "access_status": null,
+            "total_fetched": null,
+            "noise_filtered": 0,
+            "strategy_used": null,
+            "limitation": null,
+            "proof_url": null
+          }
+        }
+      },
+      "enterprise_gate": {
+        "passes": true,
+        "tier": "fortune_500",
+        "reason": "Fortune 500 company",
+        "confidence": 0.99
+      },
+      "geography": {
+        "hq_state": "TX",
+        "detected_hiring_states": [],
+        "detected_office_states": [],
+        "signal_states": [],
+        "target_states": [
+          "TX",
+          "OK",
+          "KS"
+        ],
+        "hq_in_territory": true,
+        "territory_presence": []
+      },
+      "scores": {
+        "fit_score": 21.0,
+        "pain_score": 0.0,
+        "timing_score": 0.0,
+        "territory_score": 8.0,
+        "total_score": 29.0,
+        "meeting_propensity": 10.1,
+        "heat_level": "COLD",
+        "surfaced": false,
+        "surface_reason": "Score 29 < threshold 55 (0 live signals \u2014 base score only)",
+        "score_evidence": [
+          "Enterprise tier (fortune_500): +15pts",
+          "Regulated industry (Airlines): +6pts",
+          "HQ in target territory (TX) +8pts"
+        ],
+        "fit_rules": [
+          {
+            "rule": "enterprise_tier",
+            "points": 15,
+            "evidence": "Tier: fortune_500 \u2192 15pts"
+          },
+          {
+            "rule": "regulated_industry",
+            "points": 6,
+            "evidence": "Industry: Airlines"
+          }
+        ],
+        "pain_rules": [],
+        "timing_rules": [],
+        "territory_rules": [
+          {
+            "rule": "hq_in_territory",
+            "points": 8,
+            "evidence": "HQ state TX is in target territory"
+          }
+        ]
+      },
+      "signals": []
+    },
+    {
+      "company_name": "Southwest Airlines",
+      "industry": "Airlines",
+      "fortune_rank": 75,
+      "employees": 65000,
+      "hq_state": "TX",
+      "hq_city": "Dallas",
+      "ticker": "LUV",
+      "collection": {
+        "elapsed_seconds": 2.5,
+        "total_raw": 0,
+        "false_positives_removed": 0,
+        "total_after_dedup": 0,
+        "live_signals_ingested": 0,
+        "per_source": {
+          "careers_page": {
+            "signals_returned": 0,
+            "access_status": "robots_blocked",
+            "total_fetched": null,
+            "noise_filtered": 0,
+            "strategy_used": null,
+            "limitation": null,
+            "proof_url": "https://careers.southwestair.com/"
+          },
+          "greenhouse": {
+            "signals_returned": 0,
+            "access_status": "http_403",
+            "total_fetched": null,
+            "noise_filtered": 0,
+            "strategy_used": null,
+            "limitation": null,
+            "proof_url": "https://boards-api.greenhouse.io/v1/boards/southwestairlines/jobs?content=true"
+          },
+          "lever": {
+            "signals_returned": 0,
+            "access_status": "no_slug",
+            "total_fetched": null,
+            "noise_filtered": 0,
+            "strategy_used": null,
+            "limitation": null,
+            "proof_url": null
+          },
+          "newsroom": {
+            "signals_returned": 0,
+            "access_status": "connection_error",
+            "total_fetched": null,
+            "noise_filtered": 0,
+            "strategy_used": null,
+            "limitation": null,
+            "proof_url": "https://www.southwestairlinesoneblog.com/"
+          },
+          "google_news": {
+            "signals_returned": 0,
+            "access_status": null,
+            "total_fetched": 0,
+            "noise_filtered": 0,
+            "strategy_used": null,
+            "limitation": null,
+            "proof_url": null
+          },
+          "sec_edgar": {
+            "signals_returned": 0,
+            "access_status": "http_403",
+            "total_fetched": null,
+            "noise_filtered": 0,
+            "strategy_used": null,
+            "limitation": "filing index only; full 10-K/10-Q text parsing = Phase 3",
+            "proof_url": "https://efts.sec.gov/LATEST/search-index?q=%22Oracle+database%22&forms=10-K,10-Q&dateRange=custom&startdt=2024-01-01&entity=Southwest+Airlines"
+          },
+          "conference": {
+            "signals_returned": 0,
+            "access_status": null,
+            "total_fetched": null,
+            "noise_filtered": 0,
+            "strategy_used": null,
+            "limitation": null,
+            "proof_url": null
+          }
+        }
+      },
+      "enterprise_gate": {
+        "passes": true,
+        "tier": "fortune_500",
+        "reason": "Fortune 500 company",
+        "confidence": 0.99
+      },
+      "geography": {
+        "hq_state": "TX",
+        "detected_hiring_states": [],
+        "detected_office_states": [],
+        "signal_states": [],
+        "target_states": [
+          "TX",
+          "OK",
+          "KS"
+        ],
+        "hq_in_territory": true,
+        "territory_presence": []
+      },
+      "scores": {
+        "fit_score": 21.0,
+        "pain_score": 0.0,
+        "timing_score": 0.0,
+        "territory_score": 8.0,
+        "total_score": 29.0,
+        "meeting_propensity": 10.1,
+        "heat_level": "COLD",
+        "surfaced": false,
+        "surface_reason": "Score 29 < threshold 55 (0 live signals \u2014 base score only)",
+        "score_evidence": [
+          "Enterprise tier (fortune_500): +15pts",
+          "Regulated industry (Airlines): +6pts",
+          "HQ in target territory (TX) +8pts"
+        ],
+        "fit_rules": [
+          {
+            "rule": "enterprise_tier",
+            "points": 15,
+            "evidence": "Tier: fortune_500 \u2192 15pts"
+          },
+          {
+            "rule": "regulated_industry",
+            "points": 6,
+            "evidence": "Industry: Airlines"
+          }
+        ],
+        "pain_rules": [],
+        "timing_rules": [],
+        "territory_rules": [
+          {
+            "rule": "hq_in_territory",
+            "points": 8,
+            "evidence": "HQ state TX is in target territory"
+          }
+        ]
+      },
+      "signals": []
+    },
+    {
+      "company_name": "Kimberly-Clark",
+      "industry": "Consumer Goods / Manufacturing",
+      "fortune_rank": 184,
+      "employees": 46000,
+      "hq_state": "TX",
+      "hq_city": "Irving",
+      "ticker": "KMB",
+      "collection": {
+        "elapsed_seconds": 2.5,
+        "total_raw": 0,
+        "false_positives_removed": 0,
+        "total_after_dedup": 0,
+        "live_signals_ingested": 0,
+        "per_source": {
+          "careers_page": {
+            "signals_returned": 0,
+            "access_status": "robots_blocked",
+            "total_fetched": null,
+            "noise_filtered": 0,
+            "strategy_used": null,
+            "limitation": null,
+            "proof_url": "https://jobs.kimberly-clark.com/"
+          },
+          "greenhouse": {
+            "signals_returned": 0,
+            "access_status": "http_403",
+            "total_fetched": null,
+            "noise_filtered": 0,
+            "strategy_used": null,
+            "limitation": null,
+            "proof_url": "https://boards-api.greenhouse.io/v1/boards/kimberlyclark/jobs?content=true"
+          },
+          "lever": {
+            "signals_returned": 0,
+            "access_status": "no_slug",
+            "total_fetched": null,
+            "noise_filtered": 0,
+            "strategy_used": null,
+            "limitation": null,
+            "proof_url": null
+          },
+          "newsroom": {
+            "signals_returned": 0,
+            "access_status": "robots_blocked",
+            "total_fetched": null,
+            "noise_filtered": 0,
+            "strategy_used": null,
+            "limitation": null,
+            "proof_url": "https://investor.kimberly-clark.com/press-releases"
+          },
+          "google_news": {
+            "signals_returned": 0,
+            "access_status": null,
+            "total_fetched": 0,
+            "noise_filtered": 0,
+            "strategy_used": null,
+            "limitation": null,
+            "proof_url": null
+          },
+          "sec_edgar": {
+            "signals_returned": 0,
+            "access_status": "http_403",
+            "total_fetched": null,
+            "noise_filtered": 0,
+            "strategy_used": null,
+            "limitation": "filing index only; full 10-K/10-Q text parsing = Phase 3",
+            "proof_url": "https://efts.sec.gov/LATEST/search-index?q=%22Oracle+database%22&forms=10-K,10-Q&dateRange=custom&startdt=2024-01-01&entity=Kimberly-Clark"
+          },
+          "conference": {
+            "signals_returned": 0,
+            "access_status": null,
+            "total_fetched": null,
+            "noise_filtered": 0,
+            "strategy_used": null,
+            "limitation": null,
+            "proof_url": null
+          }
+        }
+      },
+      "enterprise_gate": {
+        "passes": true,
+        "tier": "fortune_500",
+        "reason": "Fortune 500 company",
+        "confidence": 0.99
+      },
+      "geography": {
+        "hq_state": "TX",
+        "detected_hiring_states": [],
+        "detected_office_states": [],
+        "signal_states": [],
+        "target_states": [
+          "TX",
+          "OK",
+          "KS"
+        ],
+        "hq_in_territory": true,
+        "territory_presence": []
+      },
+      "scores": {
+        "fit_score": 18.0,
+        "pain_score": 0.0,
+        "timing_score": 0.0,
+        "territory_score": 8.0,
+        "total_score": 26.0,
+        "meeting_propensity": 9.1,
+        "heat_level": "COLD",
+        "surfaced": false,
+        "surface_reason": "Score 26 < threshold 55 (0 live signals \u2014 base score only)",
+        "score_evidence": [
+          "Enterprise tier (fortune_500): +15pts",
+          "Regulated industry (Consumer Goods / Manufacturing): +3pts",
+          "HQ in target territory (TX) +8pts"
+        ],
+        "fit_rules": [
+          {
+            "rule": "enterprise_tier",
+            "points": 15,
+            "evidence": "Tier: fortune_500 \u2192 15pts"
+          },
+          {
+            "rule": "regulated_industry",
+            "points": 3,
+            "evidence": "Industry: Consumer Goods / Manufacturing"
+          }
+        ],
+        "pain_rules": [],
+        "timing_rules": [],
+        "territory_rules": [
+          {
+            "rule": "hq_in_territory",
+            "points": 8,
+            "evidence": "HQ state TX is in target territory"
+          }
+        ]
+      },
+      "signals": []
+    }
+  ]
+}

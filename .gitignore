@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+*.pyo
+.env
+.venv/
+venv/
+logs/
+reports/proof_output_*.json
+reports/proof_summary_*.csv
+reports/false_positive_report_*.csv
+reports/source_quality_*.json
+reports/post_run_report_*.txt
+data/
+*.log
+.DS_Store
