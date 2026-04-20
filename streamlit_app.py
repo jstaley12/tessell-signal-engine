@@ -680,10 +680,10 @@ Add keys to Streamlit secrets (`Manage app → Secrets`) for persistent use.
                 buyers   = BUYER_TITLES.get(row["industry"],
                              ["VP Infrastructure","Director Database Engineering","CIO"])
                 urgency  = urgency_explanation(sc["heat_level"], row["live_signals"], score)
-                fit_pct  = int(sc["fit_score"]  / 40 * 100)
-                pain_pct = int(sc["pain_score"] / 40 * 100)
-                time_pct = int(sc["timing_score"]/ 20 * 100)
-                terr_pct = int(sc["territory_score"]/ 20 * 100)
+                fit_pct  = int(min(100, sc["pain_score"]   / 55 * 100))
+                pain_pct = int(min(100, sc["timing_score"] / 25 * 100))
+                time_pct = int(min(100, sc["fit_score"]    / 20 * 100))
+                terr_pct = int(min(100, sc["territory_score"] / 15 * 100))
 
                 # Discovery type — visual distinction
                 disc_type = row.get("discovery_type","fallback_seed")
@@ -751,18 +751,22 @@ Add keys to Streamlit secrets (`Manage app → Secrets`) for persistent use.
     </div>
   </div>
   <div style='margin-top:10px;display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:5px 16px;'>
-    <div><div style='display:flex;justify-content:space-between;font-size:0.68rem;margin-bottom:2px;'><span style='color:#6E7681;'>Fit</span><span style='color:#58A6FF;font-family:monospace;'>{sc["fit_score"]:.0f}/40</span></div><div style='background:#21262D;border-radius:2px;height:4px;'><div style='background:#58A6FF;width:{fit_pct}%;height:4px;border-radius:2px;'></div></div></div>
-    <div><div style='display:flex;justify-content:space-between;font-size:0.68rem;margin-bottom:2px;'><span style='color:#6E7681;'>Pain</span><span style='color:#BC8CFF;font-family:monospace;'>{sc["pain_score"]:.0f}/40</span></div><div style='background:#21262D;border-radius:2px;height:4px;'><div style='background:#BC8CFF;width:{pain_pct}%;height:4px;border-radius:2px;'></div></div></div>
-    <div><div style='display:flex;justify-content:space-between;font-size:0.68rem;margin-bottom:2px;'><span style='color:#6E7681;'>Timing</span><span style='color:#3FB950;font-family:monospace;'>{sc["timing_score"]:.0f}/20</span></div><div style='background:#21262D;border-radius:2px;height:4px;'><div style='background:#3FB950;width:{time_pct}%;height:4px;border-radius:2px;'></div></div></div>
-    <div><div style='display:flex;justify-content:space-between;font-size:0.68rem;margin-bottom:2px;'><span style='color:#6E7681;'>Territory</span><span style='color:#F97316;font-family:monospace;'>{sc["territory_score"]:.0f}/20</span></div><div style='background:#21262D;border-radius:2px;height:4px;'><div style='background:#F97316;width:{terr_pct}%;height:4px;border-radius:2px;'></div></div></div>
+    <div><div style='display:flex;justify-content:space-between;font-size:0.68rem;margin-bottom:2px;'><span style='color:#6E7681;'>DB Pain</span><span style='color:#58A6FF;font-family:monospace;'>{sc["pain_score"]:.0f}/55</span></div><div style='background:#21262D;border-radius:2px;height:4px;'><div style='background:#58A6FF;width:{fit_pct}%;height:4px;border-radius:2px;'></div></div></div>
+    <div><div style='display:flex;justify-content:space-between;font-size:0.68rem;margin-bottom:2px;'><span style='color:#6E7681;'>Urgency</span><span style='color:#BC8CFF;font-family:monospace;'>{sc["timing_score"]:.0f}/25</span></div><div style='background:#21262D;border-radius:2px;height:4px;'><div style='background:#BC8CFF;width:{pain_pct}%;height:4px;border-radius:2px;'></div></div></div>
+    <div><div style='display:flex;justify-content:space-between;font-size:0.68rem;margin-bottom:2px;'><span style='color:#6E7681;'>Context</span><span style='color:#3FB950;font-family:monospace;'>{sc["fit_score"]:.0f}/20</span></div><div style='background:#21262D;border-radius:2px;height:4px;'><div style='background:#3FB950;width:{time_pct}%;height:4px;border-radius:2px;'></div></div></div>
+    <div><div style='display:flex;justify-content:space-between;font-size:0.68rem;margin-bottom:2px;'><span style='color:#6E7681;'>Territory</span><span style='color:#F97316;font-family:monospace;'>{sc["territory_score"]:.0f}/15</span></div><div style='background:#21262D;border-radius:2px;height:4px;'><div style='background:#F97316;width:{terr_pct}%;height:4px;border-radius:2px;'></div></div></div>
   </div>
-  <div style='margin-top:10px;padding-top:8px;border-top:1px solid #21262D;display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:0.71rem;'>
-    <div><div style='color:#6E7681;margin-bottom:2px;'>Why discovered</div><div style='color:#C9D1D9;'>{why_disc_text}</div></div>
-    <div><div style='color:#6E7681;margin-bottom:2px;'>Enterprise qualification</div><div style='color:#C9D1D9;'>{gate_tier}{frank}</div></div>
-    <div><div style='color:#6E7681;margin-bottom:2px;'>Tessell relevance</div><div style='color:{tessell_color};'>{tessell_rel_text}</div></div>
-    <div><div style='color:#6E7681;margin-bottom:2px;'>Urgency</div><div style='color:#C9D1D9;'>{urgency}</div></div>
+  <div style='margin-top:10px;padding-top:8px;border-top:1px solid #21262D;font-size:0.71rem;'>
+    <div style='color:#EAB308;font-weight:500;margin-bottom:4px;font-size:0.73rem;'>⚡ Why Tessell Now</div>
+    <div style='color:#E6EDF3;font-size:0.75rem;margin-bottom:8px;'>{tessell_rel_text}</div>
+    <div style='display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;'>
+      <div><div style='color:#6E7681;margin-bottom:2px;'>How discovered</div><div style='color:#C9D1D9;'>{why_disc_text}</div></div>
+      <div><div style='color:#6E7681;margin-bottom:2px;'>Enterprise qual</div><div style='color:#C9D1D9;'>{gate_tier}{frank}</div></div>
+      <div><div style='color:#6E7681;margin-bottom:2px;'>Urgency</div><div style='color:#C9D1D9;'>{urgency}</div></div>
+    </div>
+    <div style='margin-top:6px;'><span style='color:#6E7681;'>Likely buyers: </span><span style='color:#C9D1D9;'>{buyers_str}</span></div>
   </div>
-  <div style='margin-top:6px;font-size:0.71rem;'><span style='color:#6E7681;'>Likely buyers: </span><span style='color:#C9D1D9;'>{buyers_str}</span></div>
+
   {evid_html}
   <div style='margin-top:6px;font-size:0.65rem;color:#444D56;background:#0D1117;padding:4px 8px;border-radius:4px;font-family:monospace;'>{debug_str}</div>
 </div>""", unsafe_allow_html=True)
