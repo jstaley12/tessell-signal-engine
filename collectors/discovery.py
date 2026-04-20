@@ -158,6 +158,68 @@ TECH_VENDORS = {
     "dell","hewlett","vmware","cisco","netapp","pure storage","nutanix",
 }
 
+# ── Media/publisher domain filters ───────────────────────────────────────────
+# These domains publish ABOUT companies but are not buyers themselves.
+
+# Skip entirely — market research blogs, SEO content farms
+SKIP_DOMAINS: set = {
+    'themarketsdaily','247wallst','marketsandresearch','marketswatch',
+    'businessmarketinsights','grandviewresearch','mordorintelligence',
+    'alliedmarketresearch','transparencymarketresearch','databridgemarketresearch',
+    'verifiedmarketresearch','reportlinker','businessresearchinsights',
+    'industryarc','fortunebusinessinsights','zionmarketresearch',
+    'marketresearchfuture','coherentmarketinsights','marketresearchstore',
+    'strategymrc','researchandmarkets','ibisworld','statista',
+    'fxstreet','investingcom','stockanalysis','simplywall',
+    'wisesheets','macrotrends','stockopedia',
+}
+
+# Wire services — contain real company news but domain is the wire, not the buyer
+# Extract company from headline, not from domain name
+WIRE_SERVICE_DOMAINS: set = {
+    'globenewswire','prnewswire','businesswire','accesswire',
+    'einpresswire','prweb','newswire','send2press','prlog',
+}
+
+# Investor/financial blogs — low confidence, extract company but flag
+INVESTOR_BLOG_DOMAINS: set = {
+    'seekingalpha','benzinga','motleyfool','thestreet','investorplace',
+    'zacks','marketbeat','fool','247wallstreet','schaeffersresearch',
+    'thefly','valuewalk','streetinsider',
+}
+
+# News media — extract company from headline, DO NOT use domain as company name
+NEWS_MEDIA_DOMAINS: set = {
+    'reuters','bloomberg','wsj','ft','cnbc','cnn','bbc','apnews',
+    'businessinsider','techcrunch','venturebeat','wired','axios',
+    'theregister','zdnet','computerworld','informationweek',
+    'dallasnews','chron','oklahoman','kansascity','star',
+    'dallasobserver','houstonpress','texastribune',
+}
+
+ALL_NON_BUYER_DOMAINS = SKIP_DOMAINS | WIRE_SERVICE_DOMAINS | INVESTOR_BLOG_DOMAINS | NEWS_MEDIA_DOMAINS
+
+
+def domain_filter(domain: str) -> str:
+    """
+    Returns one of:
+      'skip'        — market research / SEO content farm — ignore completely
+      'wire'        — press wire — extract real company FROM headline
+      'media'       — news/investor blog — extract company, low confidence
+      'company'     — domain looks like a real company website
+    """
+    if not domain:
+        return 'company'
+    d = domain.lower().split('.')[0].replace('-','').replace('_','')
+    if any(s in d for s in SKIP_DOMAINS):
+        return 'skip'
+    if any(s in d for s in WIRE_SERVICE_DOMAINS):
+        return 'wire'
+    if any(s in d for s in INVESTOR_BLOG_DOMAINS | NEWS_MEDIA_DOMAINS):
+        return 'media'
+    return 'company'
+
+
 NOT_COMPANY_WORDS = {
     "the","a","an","in","at","for","on","of","and","or","with","by",
     "texas","oklahoma","kansas","dallas","houston","tulsa","wichita",
@@ -506,6 +568,11 @@ def discover_from_gdelt(state: str, max_companies: int = 30) -> Tuple[List[Disco
             if not title:
                 continue
 
+            # Filter by domain type
+            dom_type = domain_filter(domain)
+            if dom_type == 'skip':
+                continue   # market research blog — ignore entirely
+
             full_text = title
             if not is_relevant(full_text):
                 meta["relevant_articles"] += 0
@@ -522,11 +589,15 @@ def discover_from_gdelt(state: str, max_companies: int = 30) -> Tuple[List[Disco
             # Extract company names from headline
             companies = extract_companies_from_text(title)
 
-            # Also: the domain often IS the company (e.g. att.com → AT&T)
-            if domain and "." in domain:
+            # Use domain as company name ONLY if it looks like a real company site
+            # (not wire services, media, or market research blogs)
+            if domain and "." in domain and dom_type == 'company':
                 domain_co = domain.split(".")[0].replace("-"," ").title()
                 if len(domain_co) > 2 and domain_co.lower() not in NOT_COMPANY_WORDS:
                     companies = [domain_co] + companies
+
+            # Confidence penalty for non-company domains
+            base_confidence = 0.68 if dom_type == 'company' else 0.52
 
             kws      = extract_keywords(full_text)
             sig_state = detect_state(full_text) or state
@@ -555,7 +626,7 @@ def discover_from_gdelt(state: str, max_companies: int = 30) -> Tuple[List[Disco
                     signal_type=sig_type,
                     raw_snippet=f"{title} | {domain}",
                     extracted_keywords=kws,
-                    confidence_score=0.68,
+                    confidence_score=base_confidence,
                     state_detected=sig_state,
                     city_detected=detect_city(title),
                     enterprise_relevance_score=enterprise_relevance(kws),
