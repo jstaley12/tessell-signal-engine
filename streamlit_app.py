@@ -188,7 +188,7 @@ with st.sidebar:
 
     st.markdown("---")
     st.markdown('<div style="font-size:0.68rem;color:#6E7681;text-transform:uppercase;letter-spacing:0.1em;margin-bottom:8px;">Quick Filters</div>', unsafe_allow_html=True)
-    preset_choice = st.selectbox("Quick Filters", ["— choose —"] + list(PRESET_FILTERS.keys()), label_visibility="collapsed")
+    preset_choice = st.selectbox("", ["— choose —"] + list(PRESET_FILTERS.keys()), label_visibility="collapsed")
     st.markdown("---")
     st.markdown('<div style="font-size:0.68rem;color:#6E7681;text-transform:uppercase;letter-spacing:0.1em;margin-bottom:8px;">Manual Filters</div>', unsafe_allow_html=True)
     heat_options = ["HOT","WARM","WATCHLIST","SIGNAL PENDING","BASE FIT ONLY"]
@@ -389,36 +389,40 @@ elif "Detail" in page:
             st.markdown(f"<div style='display:flex;justify-content:space-between;align-items:center;background:#161B22;border:1px solid #21262D;border-radius:6px;padding:10px 14px;margin-bottom:6px;'><span style='font-size:0.85rem;color:#E6EDF3;font-weight:500;'>{title}</span><span style='font-size:0.7rem;color:#6E7681;background:#21262D;padding:2px 8px;border-radius:20px;'>{lbl}</span></div>", unsafe_allow_html=True)
 
 # ════════════════════════════════════════════════════════════════════
-# RUN LIVE SCAN
+# RUN LIVE SCAN  —  full per-source diagnostics
 # ════════════════════════════════════════════════════════════════════
 elif "Scan" in page:
     st.markdown("### 🔬 Run Live Signal Scan")
-    st.markdown("Streamlit Cloud has real internet — this runs the signal collector directly here. Greenhouse, Lever, Google News RSS and newsrooms will all work.")
+    st.markdown("Runs signal collection directly from Streamlit Cloud. Full per-source diagnostics shown after each scan.")
 
     col1, col2 = st.columns(2)
     with col1:
-        target_states = st.multiselect("Territory", ["TX","OK","KS","AR","NM","AZ","CO","LA"], default=["TX","OK","KS"])
-        company_subset = st.selectbox("Companies to scan", ["Quick test — 3 companies","TX HQ only (7)","OK + KS HQ (3)","All 25"])
+        target_states  = st.multiselect("Territory", ["TX","OK","KS","AR","NM","AZ","CO","LA"], default=["TX","OK","KS"])
+        company_subset = st.selectbox("Companies to scan",
+                                       ["Quick test — 3 companies","TX HQ only (7)","OK + KS HQ (3)","All 25"])
     with col2:
-        st.markdown("**Sources that will run:**")
-        st.markdown("- Greenhouse job listings (Oracle/DBA/SRE)\n- Lever job listings\n- Google News RSS (transformation, leadership)\n- Company newsroom press releases\n- Careers page HTML scrape")
+        st.markdown("**Sources attempted per company:**")
+        st.markdown("- Greenhouse (public JSON API)\n- Lever (public JSON API)\n- Google News RSS\n- Company newsroom HTML\n- Careers page HTML scrape")
 
     if st.button("▶ Run Live Scan", type="primary"):
         subset_map = {
-            "All 25":                    [c["name"] for c in TARGETS],
-            "TX HQ only (7)":            [c["name"] for c in TARGETS if c["hq_state"]=="TX"],
-            "OK + KS HQ (3)":            [c["name"] for c in TARGETS if c["hq_state"] in ("OK","KS")],
-            "Quick test — 3 companies":  ["McKesson","ONEOK","Cummins"],
+            "All 25":                   [c["name"] for c in TARGETS],
+            "TX HQ only (7)":           [c["name"] for c in TARGETS if c["hq_state"]=="TX"],
+            "OK + KS HQ (3)":           [c["name"] for c in TARGETS if c["hq_state"] in ("OK","KS")],
+            "Quick test — 3 companies": ["McKesson","ONEOK","Cummins"],
         }
         companies_to_scan = [c for c in TARGETS if c["name"] in subset_map.get(company_subset,[])]
 
-        progress_bar = st.progress(0)
-        status_text  = st.empty()
+        progress_bar  = st.progress(0)
+        status_text   = st.empty()
         results_store = []
-        DB_TECH = {"oracle","sql server","postgresql","postgres","mysql","mongodb","aurora","rds","azure sql","db2","mariadb"}
+        diag_store    = []   # full diagnostics per company
+        DB_TECH = {"oracle","sql server","postgresql","postgres","mysql",
+                   "mongodb","aurora","rds","azure sql","db2","mariadb"}
 
         try:
             from collectors.live_collectors import collect_all
+            from collectors.fetcher import FetchLog
             from scoring.scorer import (TessellScorer, enterprise_gate,
                                         detect_hiring_states, extract_states_from_text)
             scorer_obj = TessellScorer()
@@ -427,12 +431,118 @@ elif "Scan" in page:
                 name = cd["name"]
                 status_text.markdown(f"🔍 Scanning **{name}** ({i+1}/{len(companies_to_scan)})...")
 
+                # Reset fetch log for this company so we get clean per-company data
+                FetchLog.reset()
+                t_company_start = time.time()
+
                 col_result = collect_all(
-                    company=name, greenhouse_slug=cd.get("greenhouse_slug"),
-                    careers_url=cd.get("careers_url"), newsroom_url=cd.get("newsroom_url"),
+                    company=name,
+                    greenhouse_slug=cd.get("greenhouse_slug"),
+                    careers_url=cd.get("careers_url"),
+                    newsroom_url=cd.get("newsroom_url"),
                     news_terms=cd.get("news_terms"),
                 )
-                signals  = col_result["signals"]
+
+                t_company_elapsed = round(time.time() - t_company_start, 1)
+                signals    = col_result["signals"]
+                fetch_log  = FetchLog.entries.copy()   # capture before next company resets it
+
+                # Build per-source diagnostics dict — one entry per source
+                per_source_diag = {}
+                for src, meta in col_result.get("per_source", {}).items():
+                    # Find all FetchLog entries that belong to this source
+                    src_entries = [e for e in fetch_log if e.source_name == src
+                                   or (src in e.source_name) or (e.source_name in src)]
+
+                    # Determine failure reason
+                    status      = meta.get("access_status", "unknown")
+                    # Use the right field name per source type
+                    if src in ("greenhouse","lever"):
+                        total_found = meta.get("total_jobs_fetched", 0)
+                    elif src in ("careers_page","newsroom","ir_page","workday","icims"):
+                        total_found = meta.get("raw_candidates", 0)
+                    elif src in ("google_news","google_news_rss"):
+                        total_found = meta.get("raw_items_fetched", 0)
+                    else:
+                        total_found = meta.get("total_jobs_fetched") or meta.get("raw_candidates") or meta.get("raw_items_fetched") or 0
+                    noise_out   = meta.get("noise_filtered", 0)
+                    accepted    = meta.get("relevant_signals", 0)
+                    strategy    = meta.get("strategy_used", "")
+                    limitation  = meta.get("limitation", "")
+                    endpoint    = meta.get("endpoint") or meta.get("url") or meta.get("proof_url") or ""
+
+                    # HTTP details from FetchLog
+                    http_codes   = [e.http_code for e in src_entries if e.http_code]
+                    elapsed_list = [e.elapsed_ms for e in src_entries]
+                    content_lens = [e.content_len for e in src_entries if e.content_len]
+                    notes        = list(set(e.note for e in src_entries if e.note))
+                    statuses     = list(set(e.status for e in src_entries))
+
+                    # Determine failure reason bucket
+                    if accepted > 0:
+                        failure_reason = None
+                    elif status == "no_slug":
+                        failure_reason = "no_slug_configured"
+                    elif status == "not_implemented":
+                        failure_reason = "not_implemented_phase3"
+                    elif "robots" in str(statuses):
+                        failure_reason = "robots_txt_blocked"
+                    elif "http_403" in str(statuses) or 403 in http_codes:
+                        failure_reason = "http_403_forbidden"
+                    elif "http_404" in str(statuses) or 404 in http_codes:
+                        failure_reason = "http_404_not_found"
+                    elif "timeout" in str(statuses):
+                        failure_reason = "timeout"
+                    elif "connection_error" in str(statuses):
+                        failure_reason = "connection_error"
+                    elif status == "success" and total_found == 0:
+                        failure_reason = "connected_but_no_records_found"
+                    elif status == "success" and total_found > 0 and noise_out >= total_found:
+                        failure_reason = "keyword_filter_removed_all"
+                    elif status == "success" and total_found > 0:
+                        failure_reason = "parser_found_records_but_0_passed_filter"
+                    elif limitation:
+                        failure_reason = f"partial_js_render_needed"
+                    elif status in ("error", "unknown"):
+                        failure_reason = f"error: {notes[0][:60] if notes else 'unknown'}"
+                    else:
+                        failure_reason = f"status={status}"
+
+                    # Grab raw sample snippets from accepted signals for this source
+                    source_signals = [s for s in signals
+                                      if (s.source_type if hasattr(s,"source_type") else s.get("source_type","")) == src
+                                      or src in (s.source_type if hasattr(s,"source_type") else s.get("source_type",""))]
+                    samples = []
+                    for sig in source_signals[:2]:
+                        snippet = sig.raw_snippet if hasattr(sig,"raw_snippet") else sig.get("raw_snippet","")
+                        samples.append(snippet[:200])
+
+                    per_source_diag[src] = {
+                        "endpoint":        endpoint,
+                        "http_codes":      http_codes,
+                        "http_statuses":   statuses,
+                        "content_lengths": content_lens,
+                        "elapsed_ms":      sum(elapsed_list) if elapsed_list else 0,
+                        "total_fetched":   total_found,
+                        "noise_filtered":  noise_out,
+                        "accepted":        accepted,
+                        "strategy":        strategy,
+                        "failure_reason":  failure_reason,
+                        "limitation":      limitation,
+                        "notes":           notes,
+                        "raw_samples":     samples,
+                        "fetch_entries":   len(src_entries),
+                    }
+
+                diag_store.append({
+                    "company":          name,
+                    "total_signals":    len(signals),
+                    "elapsed_seconds":  t_company_elapsed,
+                    "per_source":       per_source_diag,
+                    "fetch_log_count":  len(fetch_log),
+                })
+
+                # Scoring (unchanged from before)
                 all_text = " ".join(
                     (s.raw_snippet if hasattr(s,"raw_snippet") else s.get("raw_snippet",""))
                     for s in signals
@@ -442,16 +552,16 @@ elif "Scan" in page:
                     d  = s.to_dict() if hasattr(s,"to_dict") else s
                     kw = d.get("extracted_keywords",[])
                     sc_sigs.append({
-                        "raw_title": d.get("raw_snippet","")[:100],
-                        "raw_excerpt": d.get("raw_snippet",""),
-                        "source_type": d.get("source_type",""),
+                        "raw_title":     d.get("raw_snippet","")[:100],
+                        "raw_excerpt":   d.get("raw_snippet",""),
+                        "source_type":   d.get("source_type",""),
                         "signal_category": d.get("signal_type",""),
                         "keywords_matched": kw,
                         "database_technologies_mentioned": [k for k in kw if k in DB_TECH],
-                        "signal_state": d.get("state_detected"),
-                        "signal_city": d.get("city_detected"),
-                        "signal_date": d.get("date_found"),
-                        "confidence": d.get("confidence_score",0.7),
+                        "signal_state":  d.get("state_detected"),
+                        "signal_city":   d.get("city_detected"),
+                        "signal_date":   d.get("date_found"),
+                        "confidence":    d.get("confidence_score",0.7),
                         "signal_strength": "strong" if d.get("confidence_score",0)>=0.85 else "moderate",
                     })
 
@@ -499,48 +609,167 @@ elif "Scan" in page:
                     "collection":{
                         "live_signals_ingested":len(signals),"total_raw":col_result["total_raw"],
                         "false_positives_removed":col_result["false_positives_removed"],
-                        "per_source":{src:{"signals_returned":m.get("relevant_signals",0),"access_status":m.get("access_status")}
+                        "per_source":{src:{"signals_returned":m.get("relevant_signals",0),
+                                           "access_status":m.get("access_status")}
                                       for src,m in col_result.get("per_source",{}).items()},
                     },
-                    "enterprise_gate":{"passes":gate.passes,"tier":gate.tier,"reason":gate.reason,"confidence":gate.confidence},
+                    "enterprise_gate":{"passes":gate.passes,"tier":gate.tier,
+                                       "reason":gate.reason,"confidence":gate.confidence},
                     "geography":{
                         "hq_state":hq_state,"detected_hiring_states":hiring_states,
                         "detected_office_states":list(set(office_states))[:6],
                         "signal_states":signal_states,"target_states":target_states,
                         "hq_in_territory":hq_state in target_states,
-                        "territory_presence":list(set([s for s in hiring_states if s in target_states]+[s for s in office_states if s in target_states])),
+                        "territory_presence":list(set(
+                            [s for s in hiring_states if s in target_states]+
+                            [s for s in office_states if s in target_states]
+                        )),
                     },
                     "scores":scores,
                     "signals":[s.to_dict() if hasattr(s,"to_dict") else s for s in signals],
                 })
                 progress_bar.progress((i+1)/len(companies_to_scan))
 
+            # ── Store results ─────────────────────────────────────────
             scan_output = {
                 "run_metadata":{
-                    "timestamp":datetime.utcnow().isoformat(),
-                    "companies_run":len(companies_to_scan),
-                    "target_territory":target_states,
-                    "data_mode":"LIVE",
+                    "timestamp":  datetime.utcnow().isoformat(),
+                    "companies_run": len(companies_to_scan),
+                    "target_territory": target_states,
+                    "data_mode": "LIVE",
                 },
-                "companies":results_store,
+                "companies": results_store,
             }
-            st.session_state["scan_data"] = scan_output
+            st.session_state["scan_data"]  = scan_output
+            st.session_state["diag_data"]  = diag_store
             progress_bar.progress(1.0)
+
             total_sigs = sum(c["collection"]["live_signals_ingested"] for c in results_store)
             hot_count  = sum(1 for c in results_store if c["scores"]["heat_level"]=="HOT")
             warm_count = sum(1 for c in results_store if c["scores"]["heat_level"]=="WARM")
             status_text.markdown("✅ **Scan complete!**")
             st.success(f"**{len(results_store)} companies · {total_sigs} live signals · {hot_count} HOT · {warm_count} WARM**")
-            st.info("Switch to **Territory Rankings** to see updated scores. Download JSON below to commit to GitHub for permanent storage.")
-            st.download_button(
-                "⬇ Download proof_output.json",
-                data=json.dumps(scan_output, indent=2, default=str),
-                file_name="proof_output.json", mime="application/json",
-            )
 
         except Exception as e:
             st.error(f"Scan error: {e}")
             st.exception(e)
+
+    # ── DIAGNOSTICS — always show after scan ─────────────────────────
+    diag_data = st.session_state.get("diag_data", [])
+    if diag_data:
+        st.markdown("---")
+        st.markdown("### 🔎 Per-Source Diagnostics")
+        st.caption("Showing exactly what happened for every source on every company.")
+
+        STATUS_ICON = {
+            None:                                  "✅",
+            "no_slug_configured":                  "⬜",
+            "not_implemented_phase3":              "⬜",
+            "robots_txt_blocked":                  "🚫",
+            "http_403_forbidden":                  "🔒",
+            "http_404_not_found":                  "❌",
+            "timeout":                             "⏱",
+            "connection_error":                    "🔌",
+            "connected_but_no_records_found":      "📭",
+            "keyword_filter_removed_all":          "🔍",
+            "parser_found_records_but_0_passed_filter": "🔍",
+            "partial_js_render_needed":            "⚠️",
+        }
+
+        for diag in diag_data:
+            co_name   = diag["company"]
+            total     = diag["total_signals"]
+            elapsed   = diag["elapsed_seconds"]
+            color     = "#3FB950" if total > 0 else "#F97316"
+            sig_label = f"{total} signal{'s' if total!=1 else ''}"
+
+            with st.expander(f"{'✅' if total>0 else '⬜'} {co_name}  —  {sig_label}  ({elapsed}s)", expanded=(total==0)):
+                per_src = diag.get("per_source", {})
+                if not per_src:
+                    st.warning("No per-source data captured.")
+                    continue
+
+                for src_name, d in per_src.items():
+                    accepted = d.get("accepted", 0)
+                    failure  = d.get("failure_reason")
+                    icon     = STATUS_ICON.get(failure, "⬜") if accepted == 0 else "✅"
+                    elapsed_ms = d.get("elapsed_ms", 0)
+                    http_codes = d.get("http_codes", [])
+                    content_lens = d.get("content_lengths", [])
+                    statuses = d.get("http_statuses", [])
+                    fetched  = d.get("total_fetched", 0)
+                    noise    = d.get("noise_filtered", 0)
+                    strategy = d.get("strategy", "")
+                    endpoint = d.get("endpoint", "")
+                    notes    = d.get("notes", [])
+                    samples  = d.get("raw_samples", [])
+                    limitation = d.get("limitation","")
+
+                    # ── source row ─────────────────────────────────
+                    st.markdown(f"""
+<div style='background:#161B22;border:1px solid #21262D;border-left:3px solid {"#3FB950" if accepted>0 else "#6E7681"};
+            border-radius:6px;padding:10px 14px;margin-bottom:8px;'>
+  <div style='display:flex;justify-content:space-between;align-items:flex-start;'>
+    <div style='flex:1;'>
+      <div style='font-size:0.85rem;font-weight:600;color:#E6EDF3;margin-bottom:6px;'>
+        {icon} {src_name}
+      </div>
+      <div style='display:grid;grid-template-columns:repeat(4,1fr);gap:6px;font-size:0.72rem;'>
+        <div><span style='color:#6E7681;'>HTTP</span><br>
+             <span style='color:#C9D1D9;font-family:monospace;'>{", ".join(str(c) for c in http_codes) if http_codes else "—"}</span></div>
+        <div><span style='color:#6E7681;'>Response size</span><br>
+             <span style='color:#C9D1D9;font-family:monospace;'>{f"{max(content_lens):,} chars" if content_lens else "—"}</span></div>
+        <div><span style='color:#6E7681;'>Records found</span><br>
+             <span style='color:#C9D1D9;font-family:monospace;'>{fetched}</span></div>
+        <div><span style='color:#6E7681;'>Runtime</span><br>
+             <span style='color:#C9D1D9;font-family:monospace;'>{elapsed_ms}ms</span></div>
+        <div><span style='color:#6E7681;'>Noise filtered</span><br>
+             <span style='color:#C9D1D9;font-family:monospace;'>{noise}</span></div>
+        <div><span style='color:#6E7681;'>Accepted</span><br>
+             <span style='color:{"#3FB950" if accepted>0 else "#F97316"};font-family:monospace;font-weight:600;'>{accepted}</span></div>
+        <div><span style='color:#6E7681;'>Parser</span><br>
+             <span style='color:#C9D1D9;font-family:monospace;'>{strategy or "—"}</span></div>
+        <div><span style='color:#6E7681;'>HTTP statuses</span><br>
+             <span style='color:#C9D1D9;font-family:monospace;'>{", ".join(statuses) if statuses else "—"}</span></div>
+      </div>
+      {f'<div style="margin-top:6px;font-size:0.72rem;"><span style="color:#6E7681;">Endpoint: </span><span style="color:#58A6FF;font-family:monospace;">{endpoint[:80]}</span></div>' if endpoint else ""}
+      {f'<div style="margin-top:4px;font-size:0.72rem;background:#2D1A0A;border-left:3px solid #F97316;padding:4px 8px;border-radius:4px;color:#F97316;">Failure reason: {failure}</div>' if failure else ""}
+      {f'<div style="margin-top:4px;font-size:0.72rem;color:#8B949E;">Limitation: {limitation}</div>' if limitation else ""}
+      {f'<div style="margin-top:4px;font-size:0.72rem;color:#8B949E;">Note: {"; ".join(notes[:2])}</div>' if notes else ""}
+    </div>
+  </div>
+  {"""<div style='margin-top:8px;border-top:1px solid #21262D;padding-top:6px;'>
+    <div style='font-size:0.7rem;color:#6E7681;margin-bottom:4px;'>Raw sample snippets:</div>""" +
+    "".join(f"<div style='font-size:0.71rem;font-family:monospace;color:#C9D1D9;background:#0D1117;padding:4px 8px;border-radius:4px;margin-bottom:3px;white-space:pre-wrap;'>{s[:200]}</div>" for s in samples) +
+    "</div>"
+  if samples else ""}
+</div>
+                    """, unsafe_allow_html=True)
+
+        st.markdown("---")
+        # Download diagnostics as JSON
+        st.download_button(
+            "⬇ Download full diagnostics JSON",
+            data=json.dumps({
+                "diagnostics": diag_data,
+                "summary": {
+                    "total_companies": len(diag_data),
+                    "companies_with_signals": sum(1 for d in diag_data if d["total_signals"]>0),
+                    "total_signals": sum(d["total_signals"] for d in diag_data),
+                    "sources_attempted": list(set(src for d in diag_data for src in d["per_source"])),
+                }
+            }, indent=2, default=str),
+            file_name="scan_diagnostics.json",
+            mime="application/json",
+        )
+
+        if st.session_state.get("scan_data"):
+            st.download_button(
+                "⬇ Download proof_output.json (commit to GitHub)",
+                data=json.dumps(st.session_state["scan_data"], indent=2, default=str),
+                file_name="proof_output.json",
+                mime="application/json",
+            )
 
 # ════════════════════════════════════════════════════════════════════
 # SOURCE QUALITY
