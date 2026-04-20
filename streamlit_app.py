@@ -248,12 +248,45 @@ TARGETS = [
     {"name":"ManpowerGroup",     "industry":"Professional Services",           "employees":28000,  "fortune_rank":197, "hq_state":"WI","hq_city":"Milwaukee",     "ticker":"MAN",  "greenhouse_slug":None,      "careers_url":"https://careers.manpowergroup.com/",             "newsroom_url":"https://investor.manpowergroup.com/news-releases", "news_terms":["Oracle","DBA"]},
 ]
 
+def _build_signal_bullets(sc_sigs: list, industry: str) -> list:
+    """Build Why Tessell Now bullets from actual classified signals. Tier 1 first, max 5."""
+    from collectors.signal import classify_signal_tier
+    tier1, tier2, tier3 = [], [], []
+    for sig in sc_sigs:
+        tier   = sig.get("signal_tier", 0)
+        label  = sig.get("tier_label","")
+        reason = sig.get("human_reason","")
+        src    = sig.get("source_type","")
+        if not tier or not label:
+            tier, label, reason = classify_signal_tier(
+                source_type=src,
+                signal_type=sig.get("signal_category",""),
+                snippet=sig.get("raw_excerpt",""),
+                date_str=sig.get("signal_date",""),
+                keywords=sig.get("keywords_matched",[]),
+            )
+        if not reason:
+            continue
+        entry = {"tier": tier, "label": label, "reason": reason, "src": src}
+        if tier == 1:   tier1.append(entry)
+        elif tier == 2: tier2.append(entry)
+        else:           tier3.append(entry)
+    seen, result = set(), []
+    for entry in tier1 + tier2 + tier3[:2]:
+        key = entry["reason"][:40]
+        if key not in seen:
+            seen.add(key); result.append(entry)
+        if len(result) >= 5: break
+    return result
+
+
 def display_heat(heat, live_signals):
     if heat == "COLD" and live_signals == 0:
         return "SIGNAL PENDING"
     if heat == "COLD":
         return "BASE FIT ONLY"
     return heat
+
 
 def urgency_explanation(heat, live_signals, score):
     if heat == "HOT":    return "Strong fit + active timing signals. Call this week."
@@ -502,9 +535,13 @@ Add keys to Streamlit secrets (`Manage app → Secrets`) for persistent use.
                         "database_technologies_mentioned": [k for k in kw if k in DB_TECH],
                         "signal_state": d.get("state_detected"),
                         "signal_city":  d.get("city_detected"),
-                        "signal_date":  d.get("date_found"),
+                        "signal_date":  d.get("date_found") or d.get("signal_date",""),
                         "confidence":   d.get("confidence_score",0.7),
                         "signal_strength": "strong" if d.get("confidence_score",0)>=0.85 else "moderate",
+                        # Tier taxonomy fields
+                        "signal_tier":  d.get("signal_tier", 0),
+                        "tier_label":   d.get("tier_label",""),
+                        "human_reason": d.get("human_reason",""),
                     })
 
                 # ── Enterprise gate ───────────────────────────────────
@@ -580,6 +617,8 @@ Add keys to Streamlit secrets (`Manage app → Secrets`) for persistent use.
                 disc_type       = classify_discovery_type(co.discovery_source)
                 why_disc        = _why(co.discovery_source, all_sigs)
                 tessell_reason  = _tessell(name, co.industry or "", all_sigs)
+                # Build structured signal bullets for "Why Tessell Now"
+                tessell_bullets = _build_signal_bullets(sc_sigs, co.industry or "")
 
                 # Buyer relevance scoring
                 brs, brs_reason, is_non_buyer = buyer_relevance_score(
@@ -594,6 +633,7 @@ Add keys to Streamlit secrets (`Manage app → Secrets`) for persistent use.
 
                 results_store.append({
                     "company_name":      name,
+                    "tessell_bullets":   tessell_bullets,
                     "hq_state":          hq_state,
                     "hq_city":           co.hq_city or "",
                     "industry":          co.industry or "Unknown",
@@ -732,20 +772,32 @@ Add keys to Streamlit secrets (`Manage app → Secrets`) for persistent use.
                 ticker_str       = f" · {row['ticker']}" if row.get("ticker") else ""
                 buyers_str       = " · ".join(buyers[:3])
                 loc_str          = (row["hq_city"] + ", " if row["hq_city"] else "") + row["hq_state"]
-                evid_html        = "".join(
-                    f"<div style='margin-top:3px;font-size:0.69rem;color:#8B949E;'>• {ev}</div>"
-                    for ev in score_evid[:2]
+
+                # Build Why Tessell Now bullets from actual signal tier data
+                raw_bullets = row.get("tessell_bullets") or []
+                if not raw_bullets and tessell_rel_text and tessell_rel_text != "No live signals yet":
+                    # Fallback: show industry narrative as single bullet
+                    raw_bullets = [{"tier": 2, "reason": tessell_rel_text, "src": "inferred"}]
+                if not raw_bullets:
+                    raw_bullets = [{"tier": 3, "reason": f"Known enterprise anchor — {urgency}", "src": "seed"}]
+
+                TIER_BULLET_COLOR = {1: "#EF4444", 2: "#F97316", 3: "#8B949E"}
+                TIER_BULLET_ICON  = {1: "🔴", 2: "🟠", 3: "⚫"}
+                tessell_bullets_html = "".join(
+                    f"<div style='display:flex;align-items:flex-start;gap:5px;margin-bottom:3px;'>"
+                    f"<span style='font-size:0.65rem;margin-top:1px;'>{TIER_BULLET_ICON.get(b['tier'],'⚫')}</span>"
+                    f"<span style='color:{TIER_BULLET_COLOR.get(b['tier'],'#8B949E')};font-size:0.73rem;'>{b['reason']}</span>"
+                    f"</div>"
+                    for b in raw_bullets[:4]
                 )
-                tessell_color    = "#3FB950" if ("Oracle" in tessell_rel_text or
-                                                  "Hiring" in tessell_rel_text or
-                                                  "Migration" in tessell_rel_text) else "#8B949E"
-                # Debug line (temporary — remove once scores confirmed correct)
+
+                # Debug line (temporary)
                 brs_val   = row.get("buyer_relevance_score", 0)
                 brs_rsn   = row.get("buyer_relevance_reason", "")[:50]
                 debug_str = (f"gate={'✅' if gate_passes else '❌'} · "
                              f"raw={raw_score:.0f} brs={brs_val:+d} adj={score:.0f} · "
-                             f"signals={row['live_signals']} · "
-                             f"brs_reason='{brs_rsn}'")
+                             f"signals={row['live_signals']} t1={len([b for b in raw_bullets if b.get('tier')==1])} · "
+                             f"brs='{brs_rsn}'")
 
                 st.markdown(f"""
 <div style='background:{bg};border:1px solid {color}33;border-left:3px solid {color};border-radius:8px;padding:14px 18px;margin-bottom:10px;'>
@@ -771,14 +823,14 @@ Add keys to Streamlit secrets (`Manage app → Secrets`) for persistent use.
     <div><div style='display:flex;justify-content:space-between;font-size:0.68rem;margin-bottom:2px;'><span style='color:#6E7681;'>Territory</span><span style='color:#F97316;font-family:monospace;'>{sc["territory_score"]:.0f}/15</span></div><div style='background:#21262D;border-radius:2px;height:4px;'><div style='background:#F97316;width:{terr_pct}%;height:4px;border-radius:2px;'></div></div></div>
   </div>
   <div style='margin-top:10px;padding-top:8px;border-top:1px solid #21262D;font-size:0.71rem;'>
-    <div style='color:#EAB308;font-weight:500;margin-bottom:4px;font-size:0.73rem;'>⚡ Why Tessell Now</div>
-    <div style='color:#E6EDF3;font-size:0.75rem;margin-bottom:8px;'>{tessell_rel_text}</div>
-    <div style='display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;'>
+    <div style='color:#EAB308;font-weight:600;margin-bottom:5px;font-size:0.75rem;'>⚡ Why Tessell Now</div>
+    {tessell_bullets_html}
+    <div style='display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;margin-top:6px;'>
       <div><div style='color:#6E7681;margin-bottom:2px;'>How discovered</div><div style='color:#C9D1D9;'>{why_disc_text}</div></div>
       <div><div style='color:#6E7681;margin-bottom:2px;'>Enterprise qual</div><div style='color:#C9D1D9;'>{gate_tier}{frank}</div></div>
       <div><div style='color:#6E7681;margin-bottom:2px;'>Urgency</div><div style='color:#C9D1D9;'>{urgency}</div></div>
     </div>
-    <div style='margin-top:6px;'><span style='color:#6E7681;'>Likely buyers: </span><span style='color:#C9D1D9;'>{buyers_str}</span></div>
+    <div style='margin-top:5px;'><span style='color:#6E7681;'>Buyers: </span><span style='color:#C9D1D9;'>{buyers_str}</span></div>
   </div>
 
   {evid_html}
