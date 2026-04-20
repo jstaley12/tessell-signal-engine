@@ -314,6 +314,29 @@ def enterprise_gate(
     text_lower = all_text.lower()
     name_lower = company_name.lower()
 
+    # DB vendor hard exclude — check FIRST
+    name_clean = re.sub("[^a-z0-9 ]", "", name_lower).strip()
+    for vendor in DB_VENDOR_COMPANIES:
+        if name_lower == vendor or name_lower.startswith(vendor + " ") or name_clean == vendor:
+            return EnterpriseGateResult(
+                passes=False,
+                reason=f"Database vendor/technology seller: '{company_name}' — not a Tessell buyer",
+                tier="db_vendor",
+                estimated_employees=estimated_employees,
+                confidence=0.99,
+            )
+
+    # Media company exclude
+    for media_pat in MEDIA_COMPANY_PATTERNS:
+        if media_pat in name_lower:
+            return EnterpriseGateResult(
+                passes=False,
+                reason=f"Media/research company: '{company_name}'",
+                tier="excluded",
+                estimated_employees=estimated_employees,
+                confidence=0.90,
+            )
+
     # SMB hard exclude — check before anything else
     for smb_sig in SMB_SIGNALS:
         if smb_sig in text_lower:
@@ -711,7 +734,7 @@ class TessellScorer:
         notes    = []
 
         # ── TIER 1: Immediate buying signals ────────────────────────
-        t1_pain  = self._score_db_pain(all_text, signals, notes)
+        t1_pain  = self._score_db_pain(company_name, all_text, signals, industry, notes)
         t1_hire  = self._score_hiring(all_text, signals, notes)
         t1_ops   = self._score_operational(all_text, notes)
         t1_mod   = self._score_modernization(all_text, notes)
@@ -796,23 +819,81 @@ class TessellScorer:
 
     # ── TIER 1: Oracle/DB pain (0-20) ────────────────────────────────
 
-    def _score_db_pain(self, text: str, signals: List[Dict], notes: List[str]) -> ScoreBreakdown:
+    def _score_db_pain(self, company_name: str, text: str,
+                       signals: List[Dict], industry: Optional[str],
+                       notes: List[str]) -> ScoreBreakdown:
+        """
+        Source-aware DB pain scoring.
+        - SEC signals: capped at +2 regardless of keyword matches
+        - Job/news signals: full keyword scoring
+        - Company name stripped from text before scoring (avoids Oracle Corp self-match)
+        - Inferred industry baseline: airlines/healthcare/etc get baseline without signals
+        """
         rules = []
         total = 0.0
-        text_l = text.lower()
 
-        pain_pts = 0.0
-        hit_kws = []
+        # ── A. Inferred industry baseline (no signals needed) ─────────
+        ind_base = 0
+        if industry:
+            ind_l = industry.lower()
+            for ind_key, pts in INDUSTRY_DB_COMPLEXITY.items():
+                if ind_key in ind_l:
+                    ind_base = pts
+                    break
+        if ind_base > 0:
+            rules.append({"rule":"industry_db_complexity","points":ind_base,
+                          "evidence":f"Industry '{industry}' → known DB complexity baseline"})
+            notes.append(f"Inferred DB complexity ({industry}): +{ind_base}pts baseline")
+            total += ind_base
+
+        # ── B. Signal-based scoring — source-aware ────────────────────
+        # Strip company name tokens from text to prevent self-match
+        # e.g. "Oracle Corp" should not score 'oracle' keyword
+        name_lower  = company_name.lower()
+        # Build a decontaminated text: only use text from non-SEC signals
+        live_text_parts = []
+        sec_text_parts  = []
+        for sig in signals:
+            src   = sig.get("source_type","")
+            exc   = sig.get("raw_excerpt","") or ""
+            title = sig.get("raw_title","")   or ""
+            kws   = sig.get("keywords_matched",[]) or []
+            chunk = f"{title} {exc} {' '.join(kws)}"
+            if src == "sec_edgar":
+                sec_text_parts.append(chunk)
+            else:
+                live_text_parts.append(chunk)
+
+        # Score live signals at full weight, strip company name
+        live_text = " ".join(live_text_parts).lower()
+        # Remove exact company name tokens (prevents Oracle Corp scoring 'oracle')
+        for token in name_lower.split():
+            if len(token) > 3:
+                live_text = live_text.replace(token, "___")
+
+        live_pts = 0.0
+        hit_kws  = []
         for kw, w in DB_PAIN_KEYWORDS.items():
-            if kw in text_l:
-                pain_pts += w
+            if kw in live_text:
+                live_pts += w
                 hit_kws.append(kw)
-        pain_pts = min(20, pain_pts)
-        if pain_pts:
-            rules.append({"rule":"db_pain_keywords","points":pain_pts,
-                          "evidence":f"DB pain: {hit_kws[:4]}"})
-            notes.append(f"Oracle/DB pain signals ({', '.join(hit_kws[:3])}): +{pain_pts:.0f}pts")
-            total += pain_pts
+        live_pts = min(20, live_pts)
+        if live_pts:
+            rules.append({"rule":"live_signal_db_pain","points":live_pts,
+                          "evidence":f"Live signals — DB pain: {hit_kws[:3]}"})
+            notes.append(f"Live DB pain signals ({', '.join(hit_kws[:3])}): +{live_pts:.0f}pts")
+            total += live_pts
+
+        # Score SEC signals — CAPPED AT +2 TOTAL regardless of content
+        if sec_text_parts:
+            sec_text  = " ".join(sec_text_parts).lower()
+            sec_hit   = any(kw in sec_text for kw in ["oracle","sql server","database","db2","postgresql"])
+            sec_pts   = 2.0 if sec_hit else 0.0
+            if sec_pts:
+                rules.append({"rule":"sec_filing_mention","points":sec_pts,
+                              "evidence":"SEC filing mentions DB technology (capped at +2)"})
+                notes.append(f"SEC filing DB mention: +{sec_pts:.0f}pts (capped)")
+                total += sec_pts
 
         capped = min(20.0, total)
         return ScoreBreakdown(raw=total, capped=capped, max_possible=20, rules_fired=rules)
