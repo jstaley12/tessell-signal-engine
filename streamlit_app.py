@@ -487,13 +487,16 @@ Add keys to Streamlit secrets (`Manage app → Secrets`) for persistent use.
             )
             disc_progress.progress(0.40)
 
-            companies_found   = disc_result["companies"]
+            companies_found   = disc_result["companies"]       # live-discovered only
+            seed_companies_raw= disc_result.get("seed_companies", [])  # separate per spec
             source_counts     = disc_result["source_counts"]
             duplicates_removed= disc_result.get("duplicates_removed", 0)
             before_dedup      = disc_result.get("before_dedup", len(companies_found))
 
+            n_live  = len(companies_found)
+            n_seeds = len(seed_companies_raw)
             disc_status.markdown(
-                f"✅ Found **{len(companies_found)} companies**. Now scoring..."
+                f"✅ Found **{n_live} live-discovered** + **{n_seeds} seed anchors** (separate). Now scoring..."
             )
 
             # Score every discovered company
@@ -662,11 +665,20 @@ Add keys to Streamlit secrets (`Manage app → Secrets`) for persistent use.
             # Sort by adjusted_total (buyer-relevance-adjusted score)
             results_store.sort(key=lambda x: x["adjusted_total"], reverse=True)
 
-            # Split buyers vs non-buyers
-            buyers_only  = [r for r in results_store
-                              if not r.get("is_non_buyer")
+            # Per spec: live-discovered companies rank separately from seeds
+            # Seeds are never mixed into live rankings
+            live_results = [r for r in results_store
+                              if r.get("discovery_type") != "seed_list"
+                              and not r.get("is_non_buyer")
                               and r["enterprise_gate"]["passes"]
                               and r["enterprise_gate"].get("tier","") != "db_vendor"]
+            seed_results = [r for r in results_store
+                              if r.get("discovery_type") == "seed_list"
+                              and not r.get("is_non_buyer")
+                              and r["enterprise_gate"]["passes"]]
+
+            # buyers_only = live + seeds for diagnostics, but displayed separately
+            buyers_only  = live_results + seed_results
             non_buyers   = [r for r in results_store if r.get("is_non_buyer")]
             gate_failed  = [r for r in results_store if not r["enterprise_gate"]["passes"] and not r.get("is_non_buyer")]
 
@@ -687,8 +699,8 @@ Add keys to Streamlit secrets (`Manage app → Secrets`) for persistent use.
             d1.metric("Raw found",           before_dedup)
             d2.metric("Duplicates removed",  duplicates_removed)
             d3.metric("After dedup",         len(results_store))
-            d4.metric("✅ Enterprise buyers", len(buyers_only))
-            d5.metric("🚫 Non-buyers excluded", len(non_buyers))
+            d4.metric("🟢 Live discovered",    len(live_results))
+            d5.metric("📋 Seed anchors (separate)", len(seed_results))
             d6,d7,d8,d9,d10 = st.columns(5)
             d6.metric("🟢 Live discovered",  live_disc_n)
             d7.metric("🟡 Mixed",            mixed_n)
@@ -713,16 +725,25 @@ Add keys to Streamlit secrets (`Manage app → Secrets`) for persistent use.
             else:
                 st.success(f"**{live_sigs} live signals · {len(buyers_only)} enterprise buyers · {len(non_buyers)} non-buyers excluded**")
 
-            # ── Best Targets This Week ──────────────────────────────
+            # ── Best Targets This Week — LIVE DISCOVERED ONLY ──────
             st.markdown("---")
             st.markdown(f"### 🎯 Best Targets This Week — {disc_state}")
-            st.caption(
-                "Ranked by buyer-relevance-adjusted score. "
-                "Media, research portals, and non-buyers excluded. "
-                "🟢 Live discovered  🟡 Mixed  ⬜ Known anchor"
-            )
+            if not live_results:
+                st.warning(
+                    "**No live-discovered companies yet.** "
+                    "The primary sources (SEC EDGAR, RSS feeds) found companies "
+                    "but they require source evidence to rank. "
+                    "Add a **NewsAPI key** in the key expander above for CIO/M&A/modernization signals "
+                    "that produce Tier 1 rankings. "
+                    "Known enterprise anchors are shown below."
+                )
+            else:
+                st.caption(
+                    f"**{len(live_results)} companies with live source evidence** — "
+                    "ranked by signal quality. Seed anchors shown separately below."
+                )
 
-            top15 = buyers_only[:15]
+            top15 = live_results[:15]
             for row in top15:
                 sc       = row["scores"]
                 heat     = display_heat(sc["heat_level"], row["live_signals"])
@@ -907,6 +928,39 @@ Add keys to Streamlit secrets (`Manage app → Secrets`) for persistent use.
                 file_name="proof_output.json",
                 mime="application/json",
             )
+
+            # ── SEED ANCHORS — separate section per spec ───────────
+            if seed_results:
+                st.markdown("---")
+                with st.expander(
+                    f"📋 Known Enterprise Anchors ({len(seed_results)} accounts) "
+                    f"— requires live signals to enter main ranking"
+                ):
+                    st.caption(
+                        "These are Fortune-tier companies known to be in this territory. "
+                        "They do **not** rank above live-discovered companies. "
+                        "Run a deeper signal scan (add NewsAPI key) to surface Tier 1 signals "
+                        "that would move them into the main ranking."
+                    )
+                    for seed_row in seed_results[:25]:
+                        seed_sc    = seed_row["scores"]
+                        seed_heat  = display_heat(seed_sc["heat_level"], seed_row["live_signals"])
+                        seed_color = HEAT_COLOR.get(seed_heat,"#6B7280")
+                        seed_score = seed_row.get("adjusted_total", seed_sc["total_score"])
+                        seed_tier  = seed_row["enterprise_gate"]["tier"].replace("_"," ").title()
+                        seed_sigs  = seed_row["live_signals"]
+                        st.markdown(
+                            f"<div style='display:flex;justify-content:space-between;"
+                            f"align-items:center;padding:6px 12px;border-bottom:1px solid #21262D;"
+                            f"font-size:0.82rem;'>"
+                            f"<span style='color:#C9D1D9;'>{seed_row['company_name']}</span>"
+                            f"<span style='color:#8B949E;'>{seed_row['industry']}</span>"
+                            f"<span style='color:#8B949E;'>{seed_tier}</span>"
+                            f"<span style='color:{seed_color};font-family:monospace;'>"
+                            f"{seed_score:.0f} · {seed_sigs} signals</span>"
+                            f"</div>",
+                            unsafe_allow_html=True
+                        )
 
         except Exception as e:
             st.error(f"Discovery error: {e}")
