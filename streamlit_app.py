@@ -38,6 +38,144 @@ HEAT_EMOJI = {"HOT":"🔴","WARM":"🟠","WATCHLIST":"🟡",
 HEAT_BG    = {"HOT":"#2D1515","WARM":"#2D1A0A","WATCHLIST":"#2B2600",
               "SIGNAL PENDING":"#0D1F33","BASE FIT ONLY":"#161B22"}
 
+# ── Buyer Relevance Scoring ───────────────────────────────────────────────────
+
+# Industry segments sorted by Tessell ICP fit
+BUYER_INDUSTRY_SCORES: dict = {
+    # Tier 1 — Oracle-heavy, regulated, complex infra (score +10 to +8)
+    "healthcare":           10, "hospital":          10, "health systems":  10,
+    "pharmaceutical":        9, "pharma":             9,
+    "insurance":             9, "financial services": 9, "banking":          9,
+    "energy":                8, "oil":                8, "gas":              8,
+    "midstream":             8, "refining":           8, "utilities":        8,
+    "airlines":              8, "airline":            8, "aviation":         8,
+    "defense":               8, "aerospace":          8,
+    # Tier 2 — Good fit (score +7 to +5)
+    "manufacturing":         7, "industrial":         7, "automotive":       7,
+    "logistics":             7, "transportation":     7, "distribution":     7,
+    "retail":                6, "consumer goods":     6,
+    "telecommunications":    6, "telecom":            6,
+    "government":            6, "federal":            6,
+    "technology":            5, "it services":        5,
+    # Non-buyers — penalize hard
+    "media":               -20, "news":             -20, "publisher":      -20,
+    "blog":                -25, "market research":  -20, "research":       -15,
+    "analyst":             -15, "market analysis":  -20, "content":        -20,
+    "staffing":             -8, "recruiting":        -8, "consulting":      -5,
+}
+
+# Company name patterns that signal non-buyer
+NON_BUYER_NAME_PATTERNS = [
+    r'(markets|market)\s*(daily|watch|pulse|insider|research|report)',
+    r'\d{3}wall\s*st',
+    r'seeking\s*alpha',
+    r'(news|press)\s*(wire|release|room)',
+    r'(research|analyst|analysis)\s*(report|firm|group)',
+    r'\.biz$',
+    r'(report|reports|reporting)',
+    r'globe\s*newswire',
+    r'pr\s*newswire',
+    r'business\s*wire',
+    r'market\s*(screener|beat|watch)',
+    r'(investors?|investing)\s*(hub|daily|news|place)',
+    r'(stock|equity)\s*(analysis|news|watch)',
+]
+
+# Company name patterns that signal real buyer
+BUYER_NAME_PATTERNS = [
+    r'\b(airlines?|airways?)\b',
+    r'\b(energy|petroleum|oil|gas|midstream|refining)\b',
+    r'\b(health|healthcare|medical|hospital|pharma)\b',
+    r'\b(bank|financial|insurance|capital)\b',
+    r'\b(manufacturing|industrial|aerospace|defense)\b',
+    r'\b(logistics|transport|shipping|freight)\b',
+    r'\b(telecom|communications?)\b',
+    r'\bFortune\s*\d+\b',
+]
+
+import re as _re
+
+def buyer_relevance_score(company_name: str, industry: str,
+                           discovery_source: str, signals: list,
+                           is_public: bool) -> tuple:
+    """
+    Returns (score: int, reason: str, is_non_buyer: bool)
+    score: -100 to +100 adjustment to total score
+    is_non_buyer: True = exclude from main rankings
+    """
+    name_lower  = company_name.lower()
+    ind_lower   = (industry or "").lower()
+    score       = 0
+    reasons     = []
+    is_non_buyer = False
+
+    # ── Non-buyer name pattern check (hard exclusion) ─────────────
+    for pattern in NON_BUYER_NAME_PATTERNS:
+        if _re.search(pattern, name_lower, _re.IGNORECASE):
+            return -100, f"Non-buyer pattern: '{pattern}'", True
+
+    # ── Industry scoring ──────────────────────────────────────────
+    for ind_key, pts in BUYER_INDUSTRY_SCORES.items():
+        if ind_key in ind_lower or ind_key in name_lower:
+            score   += pts
+            reasons.append(f"industry '{ind_key}': {pts:+d}")
+            if pts < 0:
+                is_non_buyer = True
+            break  # first match wins for industry
+
+    # ── Buyer name pattern boost ──────────────────────────────────
+    for pattern in BUYER_NAME_PATTERNS:
+        if _re.search(pattern, name_lower, _re.IGNORECASE):
+            score   += 5
+            reasons.append(f"buyer name pattern: +5")
+            break
+
+    # ── Public company boost ──────────────────────────────────────
+    if is_public:
+        score   += 8
+        reasons.append("public company: +8")
+
+    # ── SEC EDGAR signal boost (confirmed enterprise filing) ──────
+    if "sec_edgar" in discovery_source:
+        score   += 10
+        reasons.append("SEC filer: +10")
+
+    # ── Seed list boost ───────────────────────────────────────────
+    if "state_seed_list" in discovery_source:
+        score   += 12
+        reasons.append("known Fortune-tier anchor: +12")
+
+    # ── Live signal boosts ────────────────────────────────────────
+    if signals:
+        oracle_sigs = sum(1 for s in signals
+                          if "oracle" in " ".join(
+                              s.extracted_keywords if hasattr(s,"extracted_keywords")
+                              else s.get("extracted_keywords",[])
+                          ))
+        hiring_sigs = sum(1 for s in signals
+                          if (s.signal_type if hasattr(s,"signal_type")
+                              else s.get("signal_type","")) == "hiring")
+        timing_sigs = sum(1 for s in signals
+                          if (s.signal_type if hasattr(s,"signal_type")
+                              else s.get("signal_type","")) == "timing")
+
+        if oracle_sigs > 0:
+            score += min(15, oracle_sigs * 5)
+            reasons.append(f"Oracle signals ({oracle_sigs}): +{min(15,oracle_sigs*5)}")
+        if hiring_sigs > 0:
+            score += min(10, hiring_sigs * 3)
+            reasons.append(f"DBA/SRE hiring ({hiring_sigs}): +{min(10,hiring_sigs*3)}")
+        if timing_sigs > 0:
+            score += min(8, timing_sigs * 4)
+            reasons.append(f"Timing signals ({timing_sigs}): +{min(8,timing_sigs*4)}")
+
+    reason_str = " | ".join(reasons[:4]) if reasons else "no adjustment"
+    return score, reason_str, is_non_buyer
+HEAT_EMOJI = {"HOT":"🔴","WARM":"🟠","WATCHLIST":"🟡",
+              "SIGNAL PENDING":"🔵","BASE FIT ONLY":"⬜"}
+HEAT_BG    = {"HOT":"#2D1515","WARM":"#2D1A0A","WATCHLIST":"#2B2600",
+              "SIGNAL PENDING":"#0D1F33","BASE FIT ONLY":"#161B22"}
+
 BUYER_TITLES = {
     "Airlines":                    ["VP Technology","Director Database Engineering","CIO","Head of Platform Engineering"],
     "Healthcare / Distribution":   ["VP Infrastructure","Director Database Services","CIO","CISO"],
@@ -432,6 +570,17 @@ Add keys to Streamlit secrets (`Manage app → Secrets`) for persistent use.
                 why_disc        = _why(co.discovery_source, all_sigs)
                 tessell_reason  = _tessell(all_sigs)
 
+                # Buyer relevance scoring
+                brs, brs_reason, is_non_buyer = buyer_relevance_score(
+                    company_name=name,
+                    industry=co.industry or "",
+                    discovery_source=co.discovery_source,
+                    signals=all_sigs,
+                    is_public=co.is_public,
+                )
+                # Adjusted total for ranking (capped 0–100)
+                adjusted_total = max(0, min(100, scores["total_score"] + brs))
+
                 results_store.append({
                     "company_name":      name,
                     "hq_state":          hq_state,
@@ -448,82 +597,86 @@ Add keys to Streamlit secrets (`Manage app → Secrets`) for persistent use.
                     "enterprise_gate":   {
                         "passes":gate.passes,"tier":gate.tier,"reason":gate.reason
                     },
+                    "buyer_relevance_score":  brs,
+                    "buyer_relevance_reason": brs_reason,
+                    "is_non_buyer":           is_non_buyer,
+                    "adjusted_total":         adjusted_total,
                     "scores":  scores,
                     "signals": [s.to_dict() if hasattr(s,"to_dict") else s
                                 for s in all_sigs[:10]],
                 })
 
             disc_progress.progress(1.0)
-            results_store.sort(key=lambda x: x["scores"]["total_score"], reverse=True)
 
-            hot_n        = sum(1 for r in results_store if r["scores"]["heat_level"]=="HOT")
-            warm_n       = sum(1 for r in results_store if r["scores"]["heat_level"]=="WARM")
-            gate_passed  = sum(1 for r in results_store if r["enterprise_gate"]["passes"])
-            gate_failed  = len(results_store) - gate_passed
-            live_disc_n  = sum(1 for r in results_store if r["discovery_type"]=="live_discovered")
-            seed_only_n  = sum(1 for r in results_store if r["discovery_type"]=="fallback_seed")
-            mixed_n      = sum(1 for r in results_store if r["discovery_type"]=="mixed_source")
-            live_sigs    = sum(r["live_signals"] for r in results_store)
-            surfaced_n   = sum(1 for r in results_store if r["scores"].get("surfaced"))
+            # Sort by adjusted_total (buyer-relevance-adjusted score)
+            results_store.sort(key=lambda x: x["adjusted_total"], reverse=True)
+
+            # Split buyers vs non-buyers
+            buyers_only  = [r for r in results_store if not r.get("is_non_buyer") and r["enterprise_gate"]["passes"]]
+            non_buyers   = [r for r in results_store if r.get("is_non_buyer")]
+            gate_failed  = [r for r in results_store if not r["enterprise_gate"]["passes"] and not r.get("is_non_buyer")]
+
+            hot_n        = sum(1 for r in buyers_only if r["scores"]["heat_level"]=="HOT")
+            warm_n       = sum(1 for r in buyers_only if r["scores"]["heat_level"]=="WARM")
+            gate_passed  = len(buyers_only)
+            live_disc_n  = sum(1 for r in buyers_only if r["discovery_type"]=="live_discovered")
+            seed_only_n  = sum(1 for r in buyers_only if r["discovery_type"]=="fallback_seed")
+            mixed_n      = sum(1 for r in buyers_only if r["discovery_type"]=="mixed_source")
+            live_sigs    = sum(r["live_signals"] for r in buyers_only)
+            surfaced_n   = sum(1 for r in buyers_only if r["scores"].get("surfaced"))
             disc_status.markdown("✅ **Discovery complete!**")
 
-            # ── Discovery diagnostics panel ────────────────────────
+            # ── Diagnostics panel ───────────────────────────────────
             st.markdown("---")
             st.markdown("#### 📊 Discovery Diagnostics")
-
             d1,d2,d3,d4,d5 = st.columns(5)
-            d1.metric("Raw found",        before_dedup)
-            d2.metric("Duplicates removed",duplicates_removed)
-            d3.metric("After dedup",      len(results_store))
-            d4.metric("Passed gate",      gate_passed)
-            d5.metric("Rejected (gate)",  gate_failed)
-
+            d1.metric("Raw found",           before_dedup)
+            d2.metric("Duplicates removed",  duplicates_removed)
+            d3.metric("After dedup",         len(results_store))
+            d4.metric("✅ Enterprise buyers", len(buyers_only))
+            d5.metric("🚫 Non-buyers excluded", len(non_buyers))
             d6,d7,d8,d9,d10 = st.columns(5)
-            d6.metric("🟢 Live discovered", live_disc_n)
-            d7.metric("🟡 Mixed (seed+live)",mixed_n)
-            d8.metric("⬜ Seed only",       seed_only_n)
-            d9.metric("Live signals total", live_sigs)
-            d10.metric("Surfaced (≥55)",    surfaced_n)
+            d6.metric("🟢 Live discovered",  live_disc_n)
+            d7.metric("🟡 Mixed",            mixed_n)
+            d8.metric("⬜ Seed only",         seed_only_n)
+            d9.metric("Live signals",         live_sigs)
+            d10.metric("Gate failed",         len(gate_failed))
 
-            # Per-source breakdown table
             st.markdown("**Companies found per source:**")
-            src_rows = []
-            for src, cnt in source_counts.items():
-                src_rows.append({
-                    "Source":        src.replace("_"," ").title(),
-                    "Companies found": cnt,
-                    "Type": "Live signal" if src != "state_seeds" else "Seed list",
-                })
-            import pandas as pd
-            st.dataframe(pd.DataFrame(src_rows), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame([
+                {"Source": k.replace("_"," ").title(), "Found": v,
+                 "Type": "Seed list" if k=="state_seeds" else "Live signal"}
+                for k,v in source_counts.items()
+            ]), use_container_width=True, hide_index=True)
+
+            if non_buyers:
+                with st.expander(f"🚫 {len(non_buyers)} non-buyer sources excluded from rankings (click to see)"):
+                    for r in non_buyers[:20]:
+                        st.caption(f"**{r['company_name']}** — {r['buyer_relevance_reason']}")
 
             if live_sigs == 0:
-                st.warning(
-                    "**0 live signals collected.** "
-                    "Google News RSS and Indeed are either rate-limited or returned no "
-                    "relevant content for this state right now. "
-                    "Scores show Enterprise Fit + Territory only. "
-                    "Try: (1) run again in a few minutes, (2) add a free NewsAPI key above, "
-                    "or (3) check Source Quality tab for HTTP status details."
-                )
+                st.warning("**0 live signals.** Scores show Enterprise Fit + Territory only. Add a NewsAPI or SerpAPI key for richer coverage.")
             else:
-                st.success(f"**{live_sigs} live signals collected across {gate_passed} enterprise-qualified companies**")
+                st.success(f"**{live_sigs} live signals · {len(buyers_only)} enterprise buyers · {len(non_buyers)} non-buyers excluded**")
 
+            # ── Best Targets This Week ──────────────────────────────
             st.markdown("---")
-            st.markdown(f"#### Top Targets — {disc_state}")
+            st.markdown(f"### 🎯 Best Targets This Week — {disc_state}")
             st.caption(
-                "🟢 **Live discovered** = found from live signals this session  "
-                "🟡 **Mixed** = known anchor + live signals confirmed  "
-                "⬜ **Seed only** = known enterprise anchor, no live signals yet"
+                "Ranked by buyer-relevance-adjusted score. "
+                "Media, research portals, and non-buyers excluded. "
+                "🟢 Live discovered  🟡 Mixed  ⬜ Known anchor"
             )
 
-            for row in results_store[:30]:
+            top15 = buyers_only[:15]
+            for row in top15:
                 sc       = row["scores"]
                 heat     = display_heat(sc["heat_level"], row["live_signals"])
                 color    = HEAT_COLOR.get(heat, "#6B7280")
                 emoji    = HEAT_EMOJI.get(heat, "⬜")
                 bg       = HEAT_BG.get(heat, "#161B22")
-                score    = sc["total_score"]
+                score    = row.get("adjusted_total", sc["total_score"])  # buyer-relevance adjusted
+                raw_score = sc["total_score"]
                 buyers   = BUYER_TITLES.get(row["industry"],
                              ["VP Infrastructure","Director Database Engineering","CIO"])
                 urgency  = urgency_explanation(sc["heat_level"], row["live_signals"], score)
@@ -572,11 +725,13 @@ Add keys to Streamlit secrets (`Manage app → Secrets`) for persistent use.
                 tessell_color    = "#3FB950" if ("Oracle" in tessell_rel_text or
                                                   "Hiring" in tessell_rel_text or
                                                   "Migration" in tessell_rel_text) else "#8B949E"
-                # Debug line (temporary — shows gate + score inputs)
-                debug_str        = (f"gate={'✅' if gate_passes else '❌'} · "
-                                    f"reason='{gate_reason[:40]}' · "
-                                    f"signals={row['live_signals']} · "
-                                    f"src={row['discovery_source'][:30]}")
+                # Debug line (temporary — remove once scores confirmed correct)
+                brs_val   = row.get("buyer_relevance_score", 0)
+                brs_rsn   = row.get("buyer_relevance_reason", "")[:50]
+                debug_str = (f"gate={'✅' if gate_passes else '❌'} · "
+                             f"raw={raw_score:.0f} brs={brs_val:+d} adj={score:.0f} · "
+                             f"signals={row['live_signals']} · "
+                             f"brs_reason='{brs_rsn}'")
 
                 st.markdown(f"""
 <div style='background:{bg};border:1px solid {color}33;border-left:3px solid {color};border-radius:8px;padding:14px 18px;margin-bottom:10px;'>
@@ -615,19 +770,23 @@ Add keys to Streamlit secrets (`Manage app → Secrets`) for persistent use.
             # Exports
             st.markdown("---")
             export_rows = [{
-                "company":           r["company_name"],
-                "hq_state":          r["hq_state"],
-                "industry":          r["industry"],
-                "total_score":       r["scores"]["total_score"],
-                "heat":              display_heat(r["scores"]["heat_level"], r["live_signals"]),
-                "fit":               r["scores"]["fit_score"],
-                "pain":              r["scores"]["pain_score"],
-                "timing":            r["scores"]["timing_score"],
-                "territory":         r["scores"]["territory_score"],
-                "meeting_propensity":r["scores"]["meeting_propensity"],
-                "live_signals":      r["live_signals"],
-                "discovery_source":  r["discovery_source"],
-                "gate_tier":         r["enterprise_gate"]["tier"],
+                "company":              r["company_name"],
+                "hq_state":             r["hq_state"],
+                "industry":             r["industry"],
+                "adjusted_score":       r.get("adjusted_total", r["scores"]["total_score"]),
+                "raw_score":            r["scores"]["total_score"],
+                "buyer_relevance_score":r.get("buyer_relevance_score", 0),
+                "heat":                 display_heat(r["scores"]["heat_level"], r["live_signals"]),
+                "fit":                  r["scores"]["fit_score"],
+                "pain":                 r["scores"]["pain_score"],
+                "timing":               r["scores"]["timing_score"],
+                "territory":            r["scores"]["territory_score"],
+                "meeting_propensity":   r["scores"]["meeting_propensity"],
+                "live_signals":         r["live_signals"],
+                "is_non_buyer":         r.get("is_non_buyer", False),
+                "discovery_source":     r["discovery_source"],
+                "gate_tier":            r["enterprise_gate"]["tier"],
+                "why_discovered":       r.get("why_discovered",""),
             } for r in results_store]
 
             c1, c2 = st.columns(2)
