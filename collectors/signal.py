@@ -247,6 +247,93 @@ def _human_age(date_str: str) -> str:
     return f"{days // 365} year{'s' if days > 730 else ''} ago"
 
 
+def has_current_signal(signals: list) -> tuple:
+    """
+    Returns (qualifies: bool, reason: str)
+
+    A company qualifies for Top Targets ONLY if it has at least one
+    CURRENT signal matching these freshness thresholds:
+
+      news / RSS announcement    < 90 days
+      oracle_pain / modernization< 90 days
+      outage / incident          < 90 days
+      hiring                     < 60 days
+      exec_move / leadership     <120 days
+      M&A / acquisition          <180 days
+
+    EDGAR filings alone (Tier 3) do NOT qualify regardless of age.
+    Seed list entries alone do NOT qualify.
+    Multiple old EDGAR signals do NOT compound into a qualifying signal.
+
+    If no qualifying signal: company goes to Hidden Research Pool.
+    """
+    THRESHOLDS: dict = {
+        # signal_type           max_days
+        "leadership_change":    120,
+        "ma_event":             180,
+        "modernization":        90,
+        "oracle_pain":          90,
+        "outage":               90,
+        "announcement":         90,
+        "hiring":               60,
+        "transformation":       90,
+        # Tier 1 label types from classify_signal_tier
+        "TIER_1_DB_HIRE":       60,
+        "TIER_1_LEADERSHIP":    120,
+        "TIER_1_CLOUD_MIGRATION":90,
+        "TIER_1_DR_OUTAGE":     90,
+        "TIER_1_MA":            180,
+        "TIER_1_ORACLE_COST":   90,
+        "TIER_1_COST_MANDATE":  90,
+        "TIER_2_INFRA_HIRE":    60,
+        "TIER_2_MULTIREGION":   90,
+        "TIER_2_REGULATED":     180,
+        "TIER_2_DR_LANGUAGE":   90,
+        "TIER_2_MULTICLOUD":    90,
+    }
+
+    # Sources that can NEVER provide a qualifying current signal
+    NON_QUALIFYING_SOURCES = {"sec_edgar", "seed_list", "state_seed_list"}
+
+    for sig in signals:
+        # Get signal fields whether it's a LiveSignal object or dict
+        src       = (sig.source_type if hasattr(sig, "source_type")
+                     else sig.get("source_type", ""))
+        sig_type  = (sig.signal_type if hasattr(sig, "signal_type")
+                     else sig.get("signal_type", ""))
+        tier_lbl  = (sig.tier_label if hasattr(sig, "tier_label")
+                     else sig.get("tier_label", ""))
+        date_str  = (sig.date_found if hasattr(sig, "date_found")
+                     else sig.get("date_found", "")
+                         or sig.get("signal_date", ""))
+
+        # EDGAR and seeds never qualify
+        if src in NON_QUALIFYING_SOURCES:
+            continue
+
+        days = _days_ago(date_str)
+
+        # Check signal_type threshold
+        max_days = THRESHOLDS.get(sig_type)
+        if max_days and days >= 0 and days <= max_days:
+            age = _human_age(date_str)
+            label = sig_type.replace("_"," ").title()
+            return True, f"{label} ({age}) via {src}"
+
+        # Check tier_label threshold
+        max_days = THRESHOLDS.get(tier_lbl)
+        if max_days and days >= 0 and days <= max_days:
+            age = _human_age(date_str)
+            label = tier_lbl.replace("_"," ").title()
+            return True, f"{label} ({age}) via {src}"
+
+        # Undated non-EDGAR signal: give benefit of the doubt if source is live
+        if days < 0 and src not in NON_QUALIFYING_SOURCES and src:
+            return True, f"{sig_type.replace('_',' ').title()} (date unknown) via {src}"
+
+    return False, "no current signal — only historical filings or seed data"
+
+
 def classify_signal_tier(
     source_type: str,
     signal_type: str,
