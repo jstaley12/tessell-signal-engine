@@ -665,31 +665,42 @@ Add keys to Streamlit secrets (`Manage app → Secrets`) for persistent use.
             # Sort by adjusted_total (buyer-relevance-adjusted score)
             results_store.sort(key=lambda x: x["adjusted_total"], reverse=True)
 
-            # Per spec: live-discovered companies rank separately from seeds
-            # Seeds are never mixed into live rankings
-            live_results = [r for r in results_store
-                              if r.get("discovery_type") != "seed_list"
-                              and not r.get("is_non_buyer")
-                              and r["enterprise_gate"]["passes"]
-                              and r["enterprise_gate"].get("tier","") != "db_vendor"]
-            seed_results = [r for r in results_store
-                              if r.get("discovery_type") == "seed_list"
-                              and not r.get("is_non_buyer")
-                              and r["enterprise_gate"]["passes"]]
+            # ── Three-way split per spec ─────────────────────────────
+            # Top Targets:    live-discovered + has current signal (surfaced=True)
+            # Research Pool:  enterprise-qualified but no current signal
+            # Seeds:          separate list — never in main rankings
+            top_targets   = [r for r in results_store
+                               if r.get("discovery_type") != "seed_list"
+                               and not r.get("is_non_buyer")
+                               and r["enterprise_gate"]["passes"]
+                               and r["enterprise_gate"].get("tier","") != "db_vendor"
+                               and r["scores"].get("surfaced", False)]
 
-            # buyers_only = live + seeds for diagnostics, but displayed separately
-            buyers_only  = live_results + seed_results
+            research_pool = [r for r in results_store
+                               if r.get("discovery_type") != "seed_list"
+                               and not r.get("is_non_buyer")
+                               and r["enterprise_gate"]["passes"]
+                               and r["enterprise_gate"].get("tier","") != "db_vendor"
+                               and not r["scores"].get("surfaced", False)]
+
+            seed_results  = [r for r in results_store
+                               if r.get("discovery_type") == "seed_list"
+                               and not r.get("is_non_buyer")
+                               and r["enterprise_gate"]["passes"]]
+
+            # backward compat alias
+            live_results = top_targets
+            buyers_only  = top_targets + research_pool + seed_results
             non_buyers   = [r for r in results_store if r.get("is_non_buyer")]
-            gate_failed  = [r for r in results_store if not r["enterprise_gate"]["passes"] and not r.get("is_non_buyer")]
+            gate_failed  = [r for r in results_store
+                              if not r["enterprise_gate"]["passes"]
+                              and not r.get("is_non_buyer")]
 
-            hot_n        = sum(1 for r in buyers_only if r["scores"]["heat_level"]=="HOT")
-            warm_n       = sum(1 for r in buyers_only if r["scores"]["heat_level"]=="WARM")
-            gate_passed  = len(buyers_only)
-            live_disc_n  = sum(1 for r in buyers_only if r["discovery_type"]=="live_discovered")
-            seed_only_n  = sum(1 for r in buyers_only if r["discovery_type"]=="fallback_seed")
-            mixed_n      = sum(1 for r in buyers_only if r["discovery_type"]=="mixed_source")
-            live_sigs    = sum(r["live_signals"] for r in buyers_only)
-            surfaced_n   = sum(1 for r in buyers_only if r["scores"].get("surfaced"))
+            hot_n        = sum(1 for r in top_targets if r["scores"]["heat_level"]=="HOT")
+            warm_n       = sum(1 for r in top_targets if r["scores"]["heat_level"]=="WARM")
+            gate_passed  = len(top_targets) + len(research_pool)
+            live_sigs    = sum(r["live_signals"] for r in top_targets)
+            surfaced_n   = len(top_targets)
             disc_status.markdown("✅ **Discovery complete!**")
 
             # ── Diagnostics panel ───────────────────────────────────
@@ -699,8 +710,8 @@ Add keys to Streamlit secrets (`Manage app → Secrets`) for persistent use.
             d1.metric("Raw found",           before_dedup)
             d2.metric("Duplicates removed",  duplicates_removed)
             d3.metric("After dedup",         len(results_store))
-            d4.metric("🟢 Live discovered",    len(live_results))
-            d5.metric("📋 Seed anchors (separate)", len(seed_results))
+            d4.metric("🎯 Top Targets",         len(top_targets))
+            d5.metric("🔬 Research Pool",       len(research_pool))
             d6,d7,d8,d9,d10 = st.columns(5)
             d6.metric("🟢 Live discovered",  live_disc_n)
             d7.metric("🟡 Mixed",            mixed_n)
@@ -725,25 +736,24 @@ Add keys to Streamlit secrets (`Manage app → Secrets`) for persistent use.
             else:
                 st.success(f"**{live_sigs} live signals · {len(buyers_only)} enterprise buyers · {len(non_buyers)} non-buyers excluded**")
 
-            # ── Best Targets This Week — LIVE DISCOVERED ONLY ──────
+            # ── Best Targets This Week — current signals only ────────
             st.markdown("---")
             st.markdown(f"### 🎯 Best Targets This Week — {disc_state}")
-            if not live_results:
+            if not top_targets:
                 st.warning(
-                    "**No live-discovered companies yet.** "
-                    "The primary sources (SEC EDGAR, RSS feeds) found companies "
-                    "but they require source evidence to rank. "
-                    "Add a **NewsAPI key** in the key expander above for CIO/M&A/modernization signals "
-                    "that produce Tier 1 rankings. "
-                    "Known enterprise anchors are shown below."
+                    "**No companies with current signals yet.** "
+                    "SEC EDGAR found enterprise companies but they have only "
+                    "historical filings — not current buying signals. "
+                    "Add a **free NewsAPI key** above to surface CIO changes, "
+                    "M&A events, and modernization announcements (<90 days)."
                 )
             else:
                 st.caption(
-                    f"**{len(live_results)} companies with live source evidence** — "
-                    "ranked by signal quality. Seed anchors shown separately below."
+                    f"**{len(top_targets)} companies with verified current signals** — "
+                    "historical-only accounts moved to Research Pool below."
                 )
 
-            top15 = live_results[:15]
+            top15 = top_targets[:15]
             for row in top15:
                 sc       = row["scores"]
                 heat     = display_heat(sc["heat_level"], row["live_signals"])
@@ -928,6 +938,37 @@ Add keys to Streamlit secrets (`Manage app → Secrets`) for persistent use.
                 file_name="proof_output.json",
                 mime="application/json",
             )
+
+            # ── RESEARCH POOL — no current signal ────────────────────
+            if research_pool:
+                st.markdown("---")
+                with st.expander(
+                    f"🔬 Hidden Research Pool ({len(research_pool)} accounts) "
+                    f"— enterprise-qualified but no current signal"
+                ):
+                    st.caption(
+                        "These companies passed the enterprise gate and may have Oracle/DB exposure, "
+                        "but their only evidence is historical SEC filings (>180 days) or "
+                        "other stale signals. They do **not** appear in Top Targets. "
+                        "A fresh NewsAPI signal (CIO change, M&A, modernization) would move "
+                        "any of these into the main ranking immediately."
+                    )
+                    pool_cols = st.columns([3,2,2,2])
+                    pool_cols[0].markdown("**Company**")
+                    pool_cols[1].markdown("**Industry**")
+                    pool_cols[2].markdown("**Gate Tier**")
+                    pool_cols[3].markdown("**Why held back**")
+                    for rp in research_pool[:20]:
+                        rp_cols = st.columns([3,2,2,2])
+                        rp_cols[0].markdown(f"{rp['company_name']}")
+                        rp_cols[1].markdown(f"<span style='color:#8B949E;font-size:0.8rem;'>{rp['industry']}</span>",
+                                            unsafe_allow_html=True)
+                        rp_cols[2].markdown(f"<span style='color:#8B949E;font-size:0.8rem;'>"
+                                           f"{rp['enterprise_gate']['tier'].replace('_',' ').title()}</span>",
+                                           unsafe_allow_html=True)
+                        rp_cols[3].markdown(f"<span style='color:#6E7681;font-size:0.75rem;'>"
+                                           f"{rp['scores'].get('surface_reason','no current signal')[:50]}</span>",
+                                           unsafe_allow_html=True)
 
             # ── SEED ANCHORS — separate section per spec ───────────
             if seed_results:
