@@ -461,7 +461,7 @@ def enterprise_gate(
             )
         elif estimated_employees >= 500:
             # Need complexity signals to pass
-            infra_hits = sum(1 for kw in ENTERPRISE_POSITIVE if kw in text_lower)
+            infra_hits = sum(1 for kw in ENTERPRISE_CONTEXT_KEYWORDS if kw in text_lower)
             if infra_hits >= 2:
                 return EnterpriseGateResult(
                     passes=True,
@@ -476,9 +476,9 @@ def enterprise_gate(
                 )
 
     # Unknown employee count — use text signals
-    enterprise_hits = sum(w for kw, w in ENTERPRISE_POSITIVE.items() if kw in text_lower)
-    db_hits = sum(1 for kw in DB_TECHNOLOGIES if kw in text_lower)
-    infra_hits = sum(1 for kw in TRANSFORMATION_KEYWORDS if kw in text_lower)
+    enterprise_hits = sum(w for kw, w in ENTERPRISE_CONTEXT_KEYWORDS.items() if kw in text_lower)
+    db_hits   = sum(1 for kw in DB_PAIN_KEYWORDS if kw in text_lower)
+    infra_hits = sum(1 for kw in MODERNIZATION_KEYWORDS if kw in text_lower)
 
     if enterprise_hits >= 10 or (db_hits >= 2 and infra_hits >= 1):
         return EnterpriseGateResult(
