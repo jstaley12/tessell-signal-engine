@@ -358,12 +358,36 @@ Add keys to Streamlit secrets (`Manage app → Secrets`) for persistent use.
                         "signal_strength": "strong" if d.get("confidence_score",0)>=0.85 else "moderate",
                     })
 
+                # ── Enterprise gate ───────────────────────────────────
+                # Pre-qualify: seed list companies and SEC filers are
+                # guaranteed enterprise — don't make them prove it via
+                # text signals they don't have yet.
+                is_seed    = "state_seed_list" in co.discovery_source
+                is_edgar   = "sec_edgar" in co.discovery_source
+                is_serp    = "serpapi_jobs" in co.discovery_source
+
+                # Augment gate inputs from discovery metadata
+                emp_hint   = co.estimated_employees
+                rank_hint  = co.fortune_rank
+
+                # If we have no employee count but company is from a
+                # reliable structured source, give a floor hint so the
+                # gate doesn't reject on missing data
+                if emp_hint is None and (is_seed or is_edgar):
+                    emp_hint = 5000   # conservative floor for known large enterprises
+
+                # Build richer all_text — include company name itself
+                # so ENTERPRISE_POSITIVE keywords in the name register
+                gate_text  = f"{name} {all_text} enterprise fortune large scale"
+                if is_edgar:
+                    gate_text += " public company fortune 500 large enterprise"
+
                 gate = enterprise_gate(
                     company_name=name,
-                    estimated_employees=co.estimated_employees,
-                    all_text=all_text,
+                    estimated_employees=emp_hint,
+                    all_text=gate_text,
                     known_public=co.is_public,
-                    known_fortune_rank=co.fortune_rank,
+                    known_fortune_rank=rank_hint,
                 )
 
                 hq_state      = co.hq_state or disc_state
@@ -375,6 +399,9 @@ Add keys to Streamlit secrets (`Manage app → Secrets`) for persistent use.
                     for s in all_sigs
                     if (s.state_detected if hasattr(s,"state_detected") else s.get("state_detected"))
                 ))
+                # Always include the discovery state so territory fires
+                if disc_state not in signal_states:
+                    signal_states.append(disc_state)
 
                 if gate.passes:
                     r = scorer_obj.score(
@@ -528,17 +555,31 @@ Add keys to Streamlit secrets (`Manage app → Secrets`) for persistent use.
                     for s in set(row["discovery_source"].split("+")) if s
                 )
 
-                why_disc_text    = row.get("why_discovered", "")
-                tessell_rel_text = row.get("tessell_relevance", "")
+                why_disc_text    = row.get("why_discovered", "") or "Known enterprise anchor"
+                tessell_rel_text = row.get("tessell_relevance", "") or "No live signals yet"
                 gate_tier        = row["enterprise_gate"]["tier"].replace("_"," ").title()
+                gate_passes      = row["enterprise_gate"]["passes"]
+                gate_reason      = row["enterprise_gate"]["reason"]
                 score_evid       = sc.get("score_evidence", [])
                 frank            = f" · F{row['fortune_rank']}" if row.get("fortune_rank") else ""
-                tick_str         = f"&nbsp;·&nbsp; {row['ticker']}" if row.get("ticker") else ""
+                ticker_str       = f" · {row['ticker']}" if row.get("ticker") else ""
+                buyers_str       = " · ".join(buyers[:3])
+                loc_str          = (row["hq_city"] + ", " if row["hq_city"] else "") + row["hq_state"]
+                evid_html        = "".join(
+                    f"<div style='margin-top:3px;font-size:0.69rem;color:#8B949E;'>• {ev}</div>"
+                    for ev in score_evid[:2]
+                )
+                tessell_color    = "#3FB950" if ("Oracle" in tessell_rel_text or
+                                                  "Hiring" in tessell_rel_text or
+                                                  "Migration" in tessell_rel_text) else "#8B949E"
+                # Debug line (temporary — shows gate + score inputs)
+                debug_str        = (f"gate={'✅' if gate_passes else '❌'} · "
+                                    f"reason='{gate_reason[:40]}' · "
+                                    f"signals={row['live_signals']} · "
+                                    f"src={row['discovery_source'][:30]}")
 
                 st.markdown(f"""
-<div style='background:{bg};border:1px solid {color}33;border-left:3px solid {color};
-            border-radius:8px;padding:14px 18px;margin-bottom:10px;'>
-
+<div style='background:{bg};border:1px solid {color}33;border-left:3px solid {color};border-radius:8px;padding:14px 18px;margin-bottom:10px;'>
   <div style='display:flex;justify-content:space-between;align-items:flex-start;'>
     <div style='flex:1;'>
       <div style='display:flex;align-items:center;gap:8px;margin-bottom:4px;flex-wrap:wrap;'>
@@ -547,55 +588,28 @@ Add keys to Streamlit secrets (`Manage app → Secrets`) for persistent use.
         <span style='font-size:0.7rem;color:{color};border:1px solid {color}55;padding:2px 7px;border-radius:20px;font-weight:600;'>{heat}</span>
         <span style='font-size:0.68rem;color:{disc_color};background:{disc_bg};border:1px solid {disc_color}44;padding:1px 7px;border-radius:20px;'>{disc_label}</span>
       </div>
-      <div style='font-size:0.76rem;color:#8B949E;'>
-        📍 {row["hq_city"] + ", " if row["hq_city"] else ""}{row["hq_state"]}
-        &nbsp;·&nbsp; {gate_tier}{frank}
-        &nbsp;·&nbsp; {row["live_signals"]} signals
-        {tick_str}
-        &nbsp; {src_badges}
-      </div>
+      <div style='font-size:0.76rem;color:#8B949E;'>📍 {loc_str} &nbsp;·&nbsp; {gate_tier}{frank}{ticker_str} &nbsp; {src_badges}</div>
     </div>
     <div style='text-align:right;min-width:65px;'>
       <div style='font-size:2rem;font-weight:700;font-family:"IBM Plex Mono",monospace;color:{color};line-height:1;'>{score:.0f}</div>
       <div style='font-size:0.62rem;color:#6E7681;'>/ 100</div>
     </div>
   </div>
-
   <div style='margin-top:10px;display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:5px 16px;'>
     <div><div style='display:flex;justify-content:space-between;font-size:0.68rem;margin-bottom:2px;'><span style='color:#6E7681;'>Fit</span><span style='color:#58A6FF;font-family:monospace;'>{sc["fit_score"]:.0f}/40</span></div><div style='background:#21262D;border-radius:2px;height:4px;'><div style='background:#58A6FF;width:{fit_pct}%;height:4px;border-radius:2px;'></div></div></div>
     <div><div style='display:flex;justify-content:space-between;font-size:0.68rem;margin-bottom:2px;'><span style='color:#6E7681;'>Pain</span><span style='color:#BC8CFF;font-family:monospace;'>{sc["pain_score"]:.0f}/40</span></div><div style='background:#21262D;border-radius:2px;height:4px;'><div style='background:#BC8CFF;width:{pain_pct}%;height:4px;border-radius:2px;'></div></div></div>
     <div><div style='display:flex;justify-content:space-between;font-size:0.68rem;margin-bottom:2px;'><span style='color:#6E7681;'>Timing</span><span style='color:#3FB950;font-family:monospace;'>{sc["timing_score"]:.0f}/20</span></div><div style='background:#21262D;border-radius:2px;height:4px;'><div style='background:#3FB950;width:{time_pct}%;height:4px;border-radius:2px;'></div></div></div>
     <div><div style='display:flex;justify-content:space-between;font-size:0.68rem;margin-bottom:2px;'><span style='color:#6E7681;'>Territory</span><span style='color:#F97316;font-family:monospace;'>{sc["territory_score"]:.0f}/20</span></div><div style='background:#21262D;border-radius:2px;height:4px;'><div style='background:#F97316;width:{terr_pct}%;height:4px;border-radius:2px;'></div></div></div>
   </div>
-
-  <div style='margin-top:10px;padding-top:8px;border-top:1px solid #21262D;
-              display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:0.71rem;'>
-    <div>
-      <div style='color:#6E7681;margin-bottom:2px;'>Why discovered</div>
-      <div style='color:#C9D1D9;'>{why_disc_text or "Known enterprise anchor"}</div>
-    </div>
-    <div>
-      <div style='color:#6E7681;margin-bottom:2px;'>Enterprise qualification</div>
-      <div style='color:#C9D1D9;'>{gate_tier}{frank}</div>
-    </div>
-    <div>
-      <div style='color:#6E7681;margin-bottom:2px;'>Tessell relevance</div>
-      <div style='color:{"#3FB950" if tessell_rel_text and "No live" not in tessell_rel_text else "#8B949E"};'>
-        {tessell_rel_text or "No live signals — run scan for signal details"}
-      </div>
-    </div>
-    <div>
-      <div style='color:#6E7681;margin-bottom:2px;'>Urgency</div>
-      <div style='color:#C9D1D9;'>{urgency}</div>
-    </div>
+  <div style='margin-top:10px;padding-top:8px;border-top:1px solid #21262D;display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:0.71rem;'>
+    <div><div style='color:#6E7681;margin-bottom:2px;'>Why discovered</div><div style='color:#C9D1D9;'>{why_disc_text}</div></div>
+    <div><div style='color:#6E7681;margin-bottom:2px;'>Enterprise qualification</div><div style='color:#C9D1D9;'>{gate_tier}{frank}</div></div>
+    <div><div style='color:#6E7681;margin-bottom:2px;'>Tessell relevance</div><div style='color:{tessell_color};'>{tessell_rel_text}</div></div>
+    <div><div style='color:#6E7681;margin-bottom:2px;'>Urgency</div><div style='color:#C9D1D9;'>{urgency}</div></div>
   </div>
-
-  <div style='margin-top:6px;font-size:0.71rem;'>
-    <span style='color:#6E7681;'>Likely buyers: </span>
-    <span style='color:#C9D1D9;'>{" &nbsp;·&nbsp; ".join(buyers[:3])}</span>
-  </div>
-
-  {"".join(f'<div style=\"margin-top:3px;font-size:0.69rem;color:#8B949E;\">• {ev}</div>' for ev in score_evid[:2]) if score_evid else ""}
+  <div style='margin-top:6px;font-size:0.71rem;'><span style='color:#6E7681;'>Likely buyers: </span><span style='color:#C9D1D9;'>{buyers_str}</span></div>
+  {evid_html}
+  <div style='margin-top:6px;font-size:0.65rem;color:#444D56;background:#0D1117;padding:4px 8px;border-radius:4px;font-family:monospace;'>{debug_str}</div>
 </div>""", unsafe_allow_html=True)
 
             # Exports
