@@ -858,14 +858,22 @@ class TessellScorer:
         mp = self._meeting_propensity(total, tier1_pts, tier2_pts, signals)
 
         # ── SURFACE DECISION ─────────────────────────────────────────
-        # Require at least 1 Tier 1 OR 2 Tier 2 signals to surface
-        # (prevents Tier 3-only companies from appearing in results)
-        has_min_signal = tier1_pts >= 15 or tier2_pts >= 10 or ind_base >= 12
-        surfaced = total >= MIN_SURFACE_SCORE and has_min_signal
+        # A company enters Top Targets ONLY with a CURRENT signal.
+        # Industry baseline alone is NOT sufficient — it only adds score points.
+        # Historical SEC filings alone → Research Pool, not Top Targets.
+        from collectors.signal import has_current_signal
+        qualifies, current_signal_reason = has_current_signal(signals)
+
+        # Tier 1 signal always qualifies (it IS a current signal by definition)
+        if tier1_pts >= 15:
+            qualifies = True
+            current_signal_reason = f"Tier 1 signal present"
+
+        surfaced = total >= MIN_SURFACE_SCORE and qualifies
         surface_reason = (
-            f"Score {total:.0f}, {tier_scores['t1_count']} T1 signals, {tier_scores['t2_count']} T2"
+            f"Score {total:.0f} — {current_signal_reason}"
             if surfaced else
-            f"Score {total:.0f} — needs T1 signal or strong industry baseline"
+            f"Not surfaced: {current_signal_reason} (score={total:.0f})"
         )
 
         # Legacy-compatible breakdowns for UI
