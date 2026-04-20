@@ -272,6 +272,78 @@ SMB_SIGNALS = [
 ]
 
 # ════════════════════════════════════════════════════════════════════
+# HARD EXCLUSIONS
+# ════════════════════════════════════════════════════════════════════
+
+DB_VENDOR_COMPANIES = {
+    "oracle", "oracle corp", "oracle corporation",
+    "snowflake", "mongodb", "databricks", "cloudera", "teradata",
+    "couchbase", "datastax", "cockroachdb", "cockroach labs",
+    "neo4j", "arangodb", "redis", "redis labs", "redis ltd",
+    "influxdata", "influxdb", "timescaledb", "yugabyte",
+    "mariadb corporation", "mariadb plc",
+    "percona", "vitess", "planetscale",
+    "dremio", "starburst", "imply",
+    "memsql", "singlestore",
+    "amazon", "amazon.com", "amazon web services",
+    "microsoft", "microsoft corp", "microsoft corporation",
+    "google", "alphabet", "alphabet inc",
+    "ibm", "ibm corp", "international business machines",
+    "vmware", "nutanix", "pure storage", "netapp",
+    "dellemc", "dell emc", "hewlett packard", "hpe",
+}
+
+MEDIA_COMPANY_PATTERNS = [
+    "news", "media", "press", "journal", "herald", "tribune",
+    "times", "post", "gazette", "chronicle", "observer",
+    "daily", "weekly", "monthly", "magazine", "publication",
+    "research group", "market research", "analyst", "advisory",
+    "intelligence", "insights group",
+    "gartner", "forrester", "idc ", "451 research",
+    "s&p global", "morningstar", "bloomberg lp",
+]
+
+INDUSTRY_DB_COMPLEXITY = {
+    "airline":              20,
+    "airlines":             20,
+    "aviation":             16,
+    "hospital":             19,
+    "health system":        18,
+    "healthcare":           17,
+    "banking":              18,
+    "financial services":   16,
+    "insurance":            15,
+    "energy":               16,
+    "oil":                  15,
+    "midstream":            15,
+    "refining":             14,
+    "utilities":            14,
+    "utility":              14,
+    "defense":              15,
+    "aerospace":            14,
+    "pharmaceutical":       14,
+    "pharma":               14,
+    "telecom":              14,
+    "telecommunications":   14,
+    "logistics":            13,
+    "transportation":       12,
+    "manufacturing":        12,
+    "industrial":           11,
+    "automotive":           12,
+    "distribution":         11,
+    "supply chain":         11,
+    "retail":               10,
+    "consumer goods":       9,
+    "technology":           5,
+    "it services":          5,
+    "professional services": 4,
+    "media":                0,
+    "news":                 0,
+    "publishing":           0,
+    "research":             0,
+}
+
+# ════════════════════════════════════════════════════════════════════
 # ENTERPRISE GATE
 # ════════════════════════════════════════════════════════════════════
 
