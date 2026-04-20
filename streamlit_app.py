@@ -114,6 +114,17 @@ def buyer_relevance_score(company_name: str, industry: str,
         if _re.search(pattern, name_lower, _re.IGNORECASE):
             return -100, f"Non-buyer pattern: '{pattern}'", True
 
+    # ── DB vendor exclusion (aligned with enterprise_gate) ────────
+    DB_VENDOR_NAME_CHECK = {
+        "oracle","snowflake","mongodb","databricks","cloudera","teradata",
+        "couchbase","datastax","cockroachdb","neo4j","redis","influxdata",
+        "percona","memsql","singlestore","dremio","starburst",
+        "amazon","microsoft","google","alphabet","ibm","vmware","nutanix",
+    }
+    first_word = name_lower.split()[0] if name_lower.split() else ""
+    if first_word in DB_VENDOR_NAME_CHECK or name_lower in DB_VENDOR_NAME_CHECK:
+        return -100, f"Database vendor/technology seller: '{company_name}'", True
+
     # ── Industry scoring ──────────────────────────────────────────
     for ind_key, pts in BUYER_INDUSTRY_SCORES.items():
         if ind_key in ind_lower or ind_key in name_lower:
@@ -568,7 +579,7 @@ Add keys to Streamlit secrets (`Manage app → Secrets`) for persistent use.
                 from collectors.discovery import classify_discovery_type, why_discovered as _why, tessell_relevance_reason as _tessell
                 disc_type       = classify_discovery_type(co.discovery_source)
                 why_disc        = _why(co.discovery_source, all_sigs)
-                tessell_reason  = _tessell(all_sigs)
+                tessell_reason  = _tessell(name, co.industry or "", all_sigs)
 
                 # Buyer relevance scoring
                 brs, brs_reason, is_non_buyer = buyer_relevance_score(
@@ -612,7 +623,10 @@ Add keys to Streamlit secrets (`Manage app → Secrets`) for persistent use.
             results_store.sort(key=lambda x: x["adjusted_total"], reverse=True)
 
             # Split buyers vs non-buyers
-            buyers_only  = [r for r in results_store if not r.get("is_non_buyer") and r["enterprise_gate"]["passes"]]
+            buyers_only  = [r for r in results_store
+                              if not r.get("is_non_buyer")
+                              and r["enterprise_gate"]["passes"]
+                              and r["enterprise_gate"].get("tier","") != "db_vendor"]
             non_buyers   = [r for r in results_store if r.get("is_non_buyer")]
             gate_failed  = [r for r in results_store if not r["enterprise_gate"]["passes"] and not r.get("is_non_buyer")]
 
