@@ -833,7 +833,6 @@ Add keys to Streamlit secrets (`Manage app → Secrets`) for persistent use.
     <div style='margin-top:5px;'><span style='color:#6E7681;'>Buyers: </span><span style='color:#C9D1D9;'>{buyers_str}</span></div>
   </div>
 
-  {evid_html}
   <div style='margin-top:6px;font-size:0.65rem;color:#444D56;background:#0D1117;padding:4px 8px;border-radius:4px;font-family:monospace;'>{debug_str}</div>
 </div>""", unsafe_allow_html=True)
 
