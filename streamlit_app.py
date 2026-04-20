@@ -1,636 +1,570 @@
 """
-streamlit_app.py  —  Tessell Signal Engine Dashboard
-Reads proof_output.json and displays ranked enterprise accounts.
-Run locally:  streamlit run streamlit_app.py
-Deploy:       streamlit.io → connect GitHub repo → set main file
+streamlit_app.py  -  Tessell Signal Engine  |  Rackspace Seller Edition
 """
-
-import json
-import os
-import streamlit as st
-import pandas as pd
+import json, sys, os, time
 from pathlib import Path
 from datetime import datetime
+from typing import List, Dict, Any
 
-# ── Page config ───────────────────────────────────────────────────────────────
-st.set_page_config(
-    page_title="Tessell Signal Engine",
-    page_icon="🎯",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
+import streamlit as st
+import pandas as pd
 
-# ── Custom CSS — dark enterprise aesthetic ────────────────────────────────────
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+st.set_page_config(page_title="Tessell Signal Engine", page_icon="🎯",
+                   layout="wide", initial_sidebar_state="expanded")
+
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap');
-
-html, body, [class*="css"] {
-    font-family: 'IBM Plex Sans', sans-serif;
-}
-
-/* Dark sidebar */
-section[data-testid="stSidebar"] {
-    background-color: #0D1117;
-    border-right: 1px solid #21262D;
-}
-section[data-testid="stSidebar"] * {
-    color: #C9D1D9 !important;
-}
-
-/* Main background */
-.main .block-container {
-    background-color: #0D1117;
-    padding-top: 1.5rem;
-}
-
-/* Headers */
-h1, h2, h3 { font-family: 'IBM Plex Sans', sans-serif; color: #E6EDF3 !important; }
-
-/* Metric cards */
-div[data-testid="metric-container"] {
-    background: #161B22;
-    border: 1px solid #21262D;
-    border-radius: 8px;
-    padding: 12px 16px;
-}
-div[data-testid="metric-container"] label {
-    color: #8B949E !important;
-    font-size: 0.72rem !important;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-}
-div[data-testid="metric-container"] [data-testid="stMetricValue"] {
-    color: #E6EDF3 !important;
-    font-family: 'IBM Plex Mono', monospace !important;
-    font-size: 1.6rem !important;
-}
-
-/* Dataframe */
-div[data-testid="stDataFrame"] {
-    border: 1px solid #21262D;
-    border-radius: 8px;
-}
-
-/* Expander */
-details {
-    background: #161B22 !important;
-    border: 1px solid #21262D !important;
-    border-radius: 8px !important;
-}
-
-/* Selectbox / multiselect */
-div[data-baseweb="select"] {
-    background: #161B22 !important;
-}
-
-/* Info boxes */
-div[data-testid="stInfo"] {
-    background: #0D2137 !important;
-    border-color: #1F6FEB !important;
-}
-
-/* Divider */
-hr { border-color: #21262D !important; }
-
-/* General text */
-p, li, span, div { color: #C9D1D9; }
+html,body,[class*="css"]{font-family:'IBM Plex Sans',sans-serif;}
+section[data-testid="stSidebar"]{background:#0D1117;border-right:1px solid #21262D;}
+section[data-testid="stSidebar"] *{color:#C9D1D9 !important;}
+.main .block-container{background:#0D1117;padding-top:1.5rem;}
+h1,h2,h3{font-family:'IBM Plex Sans',sans-serif;color:#E6EDF3 !important;}
+div[data-testid="metric-container"]{background:#161B22;border:1px solid #21262D;border-radius:8px;padding:12px 16px;}
+div[data-testid="metric-container"] label{color:#8B949E !important;font-size:0.72rem !important;text-transform:uppercase;letter-spacing:0.08em;}
+div[data-testid="metric-container"] [data-testid="stMetricValue"]{color:#E6EDF3 !important;font-family:'IBM Plex Mono',monospace !important;font-size:1.6rem !important;}
+details{background:#161B22 !important;border:1px solid #21262D !important;border-radius:8px !important;}
+hr{border-color:#21262D !important;}
+p,li,span,div{color:#C9D1D9;}
 </style>
 """, unsafe_allow_html=True)
 
+HEAT_COLOR = {"HOT":"#EF4444","WARM":"#F97316","WATCHLIST":"#EAB308",
+              "SIGNAL PENDING":"#58A6FF","BASE FIT ONLY":"#8B949E"}
+HEAT_EMOJI = {"HOT":"🔴","WARM":"🟠","WATCHLIST":"🟡",
+              "SIGNAL PENDING":"🔵","BASE FIT ONLY":"⬜"}
+HEAT_BG    = {"HOT":"#2D1515","WARM":"#2D1A0A","WATCHLIST":"#2B2600",
+              "SIGNAL PENDING":"#0D1F33","BASE FIT ONLY":"#161B22"}
 
-# ── Load data ─────────────────────────────────────────────────────────────────
+BUYER_TITLES = {
+    "Airlines":                    ["VP Technology","Director Database Engineering","CIO","Head of Platform Engineering"],
+    "Healthcare / Distribution":   ["VP Infrastructure","Director Database Services","CIO","CISO"],
+    "Healthcare / Insurance":      ["Director Database Engineering","VP Cloud Operations","CIO"],
+    "Healthcare / Hospital Systems":["VP IT","Director Database Platform","CIO"],
+    "Energy / Midstream":          ["VP IT","Director Infrastructure","Head of Database Ops","CIO"],
+    "Energy / Oil & Gas":          ["VP Technology","Director Database Engineering","CIO"],
+    "Energy / Refining":           ["VP IT","Director Infrastructure","CIO"],
+    "Manufacturing / Industrial":  ["VP IT Infrastructure","Director Database Services","CIO","ERP Program Director"],
+    "Aerospace / Manufacturing":   ["VP IT","Director Database Engineering","CIO"],
+    "Aerospace / Defense":         ["VP Enterprise Technology","Director Database Services","CIO"],
+    "Automotive / Manufacturing":  ["VP IT","Director Database Platform","CIO"],
+    "Financial Services / Banking":["VP Database Engineering","Director DBRE","CTO","Head of Platform Engineering"],
+    "Telecommunications":          ["VP Infrastructure","Director Database Operations","CTO"],
+    "Technology / IT Services":    ["VP Database Engineering","Director SRE","CTO"],
+    "Technology / Hardware":       ["VP Cloud Infrastructure","Director Database Services","CTO"],
+    "Transportation / Logistics":  ["VP Technology","Director Database Engineering","CIO"],
+    "Logistics / Courier":         ["VP IT","Director Database Operations","CIO"],
+    "Retail":                      ["VP IT","Director Database Engineering","CIO"],
+    "Consumer Goods / Manufacturing":["VP IT","Director Database Platform","CIO"],
+    "Pharmaceuticals":             ["VP IT Infrastructure","Director Database Engineering","CIO"],
+    "Professional Services":       ["VP Technology","Director Database Services","CTO"],
+}
 
-@st.cache_data
+PRESET_FILTERS = {
+    "🤠 Texas This Week":     {"states":["TX"],"heat":["HOT","WARM"]},
+    "🌾 Kansas This Month":   {"states":["KS"],"heat":["HOT","WARM","WATCHLIST","SIGNAL PENDING","BASE FIT ONLY"]},
+    "⛽ Oklahoma Oracle":     {"states":["OK"],"heat":["HOT","WARM","WATCHLIST","SIGNAL PENDING","BASE FIT ONLY"]},
+    "🏢 Fortune 1000 Only":   {"states":[],"heat":["HOT","WARM","WATCHLIST"],"tiers":["Fortune 500","Fortune 1000"]},
+    "🔥 All HOT Accounts":    {"states":[],"heat":["HOT"]},
+    "📋 Show All":            {"states":[],"heat":["HOT","WARM","WATCHLIST","SIGNAL PENDING","BASE FIT ONLY"]},
+}
+
+TARGETS = [
+    {"name":"McKesson",          "industry":"Healthcare / Distribution",      "employees":51000,  "fortune_rank":9,   "hq_state":"TX","hq_city":"Irving",       "ticker":"MCK",  "greenhouse_slug":None,      "careers_url":"https://www.mckesson.com/Careers/",              "newsroom_url":"https://www.mckesson.com/About-McKesson/Newsroom/","news_terms":["Oracle database","database migration","DBA"]},
+    {"name":"AT&T",              "industry":"Telecommunications",              "employees":160000, "fortune_rank":13,  "hq_state":"TX","hq_city":"Dallas",       "ticker":"T",    "greenhouse_slug":None,      "careers_url":"https://www.att.jobs/search-jobs",               "newsroom_url":"https://about.att.com/story/2024/",                "news_terms":["Oracle","database engineer","cloud migration"]},
+    {"name":"American Airlines", "industry":"Airlines",                        "employees":95000,  "fortune_rank":69,  "hq_state":"TX","hq_city":"Fort Worth",   "ticker":"AAL",  "greenhouse_slug":None,      "careers_url":"https://jobs.aa.com/",                           "newsroom_url":"https://news.aa.com/",                             "news_terms":["Oracle database","database engineer"]},
+    {"name":"Southwest Airlines","industry":"Airlines",                        "employees":65000,  "fortune_rank":75,  "hq_state":"TX","hq_city":"Dallas",       "ticker":"LUV",  "greenhouse_slug":None,      "careers_url":"https://careers.southwestair.com/",              "newsroom_url":None,                                               "news_terms":["database engineer","Oracle migration"]},
+    {"name":"Kimberly-Clark",    "industry":"Consumer Goods / Manufacturing",  "employees":46000,  "fortune_rank":184, "hq_state":"TX","hq_city":"Irving",       "ticker":"KMB",  "greenhouse_slug":None,      "careers_url":"https://jobs.kimberly-clark.com/",               "newsroom_url":"https://investor.kimberly-clark.com/press-releases","news_terms":["Oracle","SAP migration","database"]},
+    {"name":"ConocoPhillips",    "industry":"Energy / Oil & Gas",              "employees":9700,   "fortune_rank":111, "hq_state":"TX","hq_city":"Houston",      "ticker":"COP",  "greenhouse_slug":None,      "careers_url":"https://careers.conocophillips.com/",            "newsroom_url":"https://investor.conocophillips.com/news-releases","news_terms":["Oracle database","SAP","cloud platform"]},
+    {"name":"Phillips 66",       "industry":"Energy / Refining",               "employees":13700,  "fortune_rank":42,  "hq_state":"TX","hq_city":"Houston",      "ticker":"PSX",  "greenhouse_slug":None,      "careers_url":"https://careers.phillips66.com/",                "newsroom_url":"https://investor.phillips66.com/news-releases",    "news_terms":["Oracle database","database engineer"]},
+    {"name":"ONEOK",             "industry":"Energy / Midstream",              "employees":3100,   "fortune_rank":218, "hq_state":"OK","hq_city":"Tulsa",        "ticker":"OKE",  "greenhouse_slug":None,      "careers_url":"https://www.oneok.com/About-ONEOK/Careers",      "newsroom_url":"https://www.oneok.com/News",                       "news_terms":["Oracle database","cloud migration","DBA"]},
+    {"name":"Devon Energy",      "industry":"Energy / Oil & Gas",              "employees":4300,   "fortune_rank":244, "hq_state":"OK","hq_city":"Oklahoma City","ticker":"DVN",  "greenhouse_slug":None,      "careers_url":"https://www.devonenergy.com/careers",            "newsroom_url":"https://www.devonenergy.com/news",                 "news_terms":["Oracle","SAP","database"]},
+    {"name":"Spirit AeroSystems","industry":"Aerospace / Manufacturing",       "employees":13000,  "fortune_rank":412, "hq_state":"KS","hq_city":"Wichita",      "ticker":"SPR",  "greenhouse_slug":None,      "careers_url":"https://jobs.spiritaero.com/",                   "newsroom_url":"https://www.spiritaero.com/company/news/",         "news_terms":["Oracle ERP","cloud migration","database"]},
+    {"name":"Cummins",           "industry":"Manufacturing / Industrial",      "employees":59900,  "fortune_rank":147, "hq_state":"IN","hq_city":"Columbus",      "ticker":"CMI",  "greenhouse_slug":"cummins", "careers_url":"https://cummins.wd1.myworkdayjobs.com/RecruiterPortal","newsroom_url":"https://www.cummins.com/news",                "news_terms":["Oracle database","SAP migration","cloud"]},
+    {"name":"Eli Lilly",         "industry":"Pharmaceuticals",                 "employees":43000,  "fortune_rank":129, "hq_state":"IN","hq_city":"Indianapolis", "ticker":"LLY",  "greenhouse_slug":None,      "careers_url":"https://lilly.jobs/",                            "newsroom_url":"https://investor.lilly.com/news-releases",         "news_terms":["database engineer","Oracle","DBA"]},
+    {"name":"UnitedHealth Group","industry":"Healthcare / Insurance",          "employees":400000, "fortune_rank":7,   "hq_state":"MN","hq_city":"Minnetonka",   "ticker":"UNH",  "greenhouse_slug":None,      "careers_url":"https://careers.unitedhealthgroup.com/",         "newsroom_url":"https://newsroom.uhc.com/",                        "news_terms":["Oracle database","database engineer","DBA"]},
+    {"name":"JPMorgan Chase",    "industry":"Financial Services / Banking",    "employees":310000, "fortune_rank":24,  "hq_state":"NY","hq_city":"New York",      "ticker":"JPM",  "greenhouse_slug":None,      "careers_url":"https://careers.jpmorgan.com/",                  "newsroom_url":"https://www.jpmorganchase.com/news",               "news_terms":["Oracle database","database reliability","DBA"]},
+    {"name":"Citigroup",         "industry":"Financial Services / Banking",    "employees":240000, "fortune_rank":33,  "hq_state":"NY","hq_city":"New York",      "ticker":"C",    "greenhouse_slug":None,      "careers_url":"https://jobs.citi.com/",                         "newsroom_url":"https://www.citigroup.com/global/news",            "news_terms":["Oracle migration","database modernization"]},
+    {"name":"Boeing",            "industry":"Aerospace / Defense",             "employees":150000, "fortune_rank":67,  "hq_state":"VA","hq_city":"Arlington",     "ticker":"BA",   "greenhouse_slug":None,      "careers_url":"https://jobs.boeing.com/",                       "newsroom_url":"https://investors.boeing.com/investors/news-releases","news_terms":["Oracle database","database engineer","SAP"]},
+    {"name":"General Motors",    "industry":"Automotive / Manufacturing",      "employees":150000, "fortune_rank":16,  "hq_state":"MI","hq_city":"Detroit",       "ticker":"GM",   "greenhouse_slug":None,      "careers_url":"https://careers.gm.com/",                        "newsroom_url":"https://investor.gm.com/news-releases",            "news_terms":["Oracle database","database platform"]},
+    {"name":"HCA Healthcare",    "industry":"Healthcare / Hospital Systems",   "employees":295000, "fortune_rank":57,  "hq_state":"TN","hq_city":"Nashville",     "ticker":"HCA",  "greenhouse_slug":None,      "careers_url":"https://careers.hcahealthcare.com/",             "newsroom_url":"https://investor.hcahealthcare.com/news-releases", "news_terms":["Oracle database","HIPAA database","cloud"]},
+    {"name":"Humana",            "industry":"Healthcare / Insurance",          "employees":67000,  "fortune_rank":53,  "hq_state":"KY","hq_city":"Louisville",    "ticker":"HUM",  "greenhouse_slug":"humana",  "careers_url":"https://careers.humana.com/",                    "newsroom_url":"https://newsroom.humana.com/",                     "news_terms":["Oracle","database modernization"]},
+    {"name":"J.B. Hunt",         "industry":"Transportation / Logistics",      "employees":35000,  "fortune_rank":409, "hq_state":"AR","hq_city":"Lowell",        "ticker":"JBHT", "greenhouse_slug":None,      "careers_url":"https://www.jbhunt.com/careers/",                "newsroom_url":"https://www.jbhunt.com/news/",                     "news_terms":["Oracle database","database engineer"]},
+    {"name":"FedEx",             "industry":"Logistics / Courier",             "employees":500000, "fortune_rank":59,  "hq_state":"TN","hq_city":"Memphis",       "ticker":"FDX",  "greenhouse_slug":None,      "careers_url":"https://careers.fedex.com/",                     "newsroom_url":"https://newsroom.fedex.com/",                      "news_terms":["Oracle database","database engineer"]},
+    {"name":"Dollar General",    "industry":"Retail",                          "employees":164000, "fortune_rank":122, "hq_state":"TN","hq_city":"Goodlettsville","ticker":"DG",   "greenhouse_slug":"dollargeneral","careers_url":"https://careers.dollargeneral.com/",          "newsroom_url":"https://investor.dollargeneral.com/news-releases", "news_terms":["Oracle database","database engineer"]},
+    {"name":"Cognizant",         "industry":"Technology / IT Services",        "employees":340000, "fortune_rank":185, "hq_state":"NJ","hq_city":"Teaneck",       "ticker":"CTSH", "greenhouse_slug":"cognizant","careers_url":"https://careers.cognizant.com/",                "newsroom_url":"https://investors.cognizant.com/news-releases",    "news_terms":["Oracle DBA","database migration"]},
+    {"name":"HP Inc",            "industry":"Technology / Hardware",           "employees":58000,  "fortune_rank":61,  "hq_state":"CA","hq_city":"Palo Alto",     "ticker":"HPQ",  "greenhouse_slug":None,      "careers_url":"https://jobs.hp.com/",                           "newsroom_url":"https://investor.hp.com/press-releases",           "news_terms":["Oracle database","DBA"]},
+    {"name":"ManpowerGroup",     "industry":"Professional Services",           "employees":28000,  "fortune_rank":197, "hq_state":"WI","hq_city":"Milwaukee",     "ticker":"MAN",  "greenhouse_slug":None,      "careers_url":"https://careers.manpowergroup.com/",             "newsroom_url":"https://investor.manpowergroup.com/news-releases", "news_terms":["Oracle","DBA"]},
+]
+
+def display_heat(heat, live_signals):
+    if heat == "COLD" and live_signals == 0:
+        return "SIGNAL PENDING"
+    if heat == "COLD":
+        return "BASE FIT ONLY"
+    return heat
+
+def urgency_explanation(heat, live_signals, score):
+    if heat == "HOT":    return "Strong fit + active timing signals. Call this week."
+    if heat == "WARM":   return "Good fit with some signals. Prioritize this month."
+    if heat == "WATCHLIST": return "Qualified account, low urgency. Monitor quarterly."
+    if live_signals == 0: return "Enterprise-qualified but no live signals yet. Run a scan to get Pain + Timing scores."
+    return "Low signal strength. Nurture list."
+
+@st.cache_data(ttl=300)
 def load_data():
-    """Load proof_output.json — from repo root or reports/ directory."""
-    candidates = [
-        Path("proof_output.json"),
-        Path("reports/proof_output.json"),
-        Path(__file__).parent / "proof_output.json",
-        Path(__file__).parent / "reports" / "proof_output.json",
-    ]
-    for p in candidates:
+    for p in [Path("proof_output.json"), Path("reports/proof_output.json"),
+              Path(__file__).parent / "proof_output.json"]:
         if p.exists():
             with open(p) as f:
                 return json.load(f)
     return None
 
+def data_to_rows(companies):
+    rows = []
+    for c in companies:
+        sc  = c.get("scores", {})
+        cl  = c.get("collection", {})
+        eg  = c.get("enterprise_gate", {})
+        geo = c.get("geography", {})
+        live     = cl.get("live_signals_ingested", 0)
+        raw_heat = sc.get("heat_level", "COLD")
+        rows.append({
+            "company":           c.get("company_name",""),
+            "industry":          c.get("industry",""),
+            "hq_state":          c.get("hq_state",""),
+            "hq_city":           c.get("hq_city",""),
+            "fortune_rank":      c.get("fortune_rank"),
+            "employees":         c.get("employees",0),
+            "tier":              eg.get("tier","").replace("_"," ").title(),
+            "total_score":       sc.get("total_score",0),
+            "fit_score":         sc.get("fit_score",0),
+            "pain_score":        sc.get("pain_score",0),
+            "timing_score":      sc.get("timing_score",0),
+            "territory_score":   sc.get("territory_score",0),
+            "meeting_prop":      sc.get("meeting_propensity",0),
+            "raw_heat":          raw_heat,
+            "display_heat":      display_heat(raw_heat, live),
+            "live_signals":      live,
+            "score_evidence":    sc.get("score_evidence",[]),
+            "signals":           c.get("signals",[]),
+            "per_source":        cl.get("per_source",{}),
+            "hq_in_territory":   geo.get("hq_in_territory",False),
+            "territory_presence":geo.get("territory_presence",[]),
+            "surface_reason":    sc.get("surface_reason",""),
+        })
+    return rows
 
 data = load_data()
+if "scan_data" not in st.session_state:
+    st.session_state["scan_data"] = None
+active_data = st.session_state["scan_data"] or data
 
-
-# ── Heat colors / emoji ───────────────────────────────────────────────────────
-
-HEAT_COLOR = {"HOT": "#EF4444", "WARM": "#F97316", "WATCHLIST": "#EAB308", "COLD": "#6B7280"}
-HEAT_EMOJI = {"HOT": "🔴", "WARM": "🟠", "WATCHLIST": "🟡", "COLD": "⚫"}
-HEAT_BG    = {"HOT": "#2D1515", "WARM": "#2D1A0A", "WATCHLIST": "#2B2600", "COLD": "#1A1A1A"}
-
-
-# ── Sidebar ───────────────────────────────────────────────────────────────────
-
+# ── SIDEBAR ───────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("""
-        <div style='padding: 8px 0 20px;'>
-            <div style='font-size:1.05rem; font-weight:600; color:#E6EDF3; letter-spacing:-0.01em;'>
-                🎯 Tessell Signal Engine
-            </div>
-            <div style='font-size:0.68rem; color:#6E7681; text-transform:uppercase;
-                        letter-spacing:0.1em; margin-top:3px;'>
-                Rackspace Seller Edition
-            </div>
+        <div style='padding:8px 0 16px;'>
+            <div style='font-size:1.05rem;font-weight:600;color:#E6EDF3;'>🎯 Tessell Signal Engine</div>
+            <div style='font-size:0.68rem;color:#6E7681;text-transform:uppercase;letter-spacing:0.1em;margin-top:3px;'>Rackspace Seller Edition</div>
         </div>
     """, unsafe_allow_html=True)
 
-    if data:
-        meta   = data.get("run_metadata", {})
-        ts_raw = meta.get("timestamp", "")
-        try:
-            ts = datetime.fromisoformat(ts_raw).strftime("%b %d, %Y %H:%M")
-        except Exception:
-            ts = ts_raw[:16]
-
+    if active_data:
+        meta = active_data.get("run_metadata",{})
+        try:    ts = datetime.fromisoformat(meta.get("timestamp","")).strftime("%b %d %Y %H:%M")
+        except: ts = meta.get("timestamp","")[:16]
+        mode_color = "#3FB950" if meta.get("data_mode")=="LIVE" else "#F97316"
         st.markdown(f"""
-            <div style='background:#161B22; border:1px solid #21262D; border-radius:8px;
-                        padding:12px; margin-bottom:16px; font-size:0.78rem; color:#8B949E;'>
+            <div style='background:#161B22;border:1px solid #21262D;border-radius:8px;
+                        padding:10px 12px;margin-bottom:12px;font-size:0.76rem;color:#8B949E;'>
                 <div><b style='color:#C9D1D9;'>Last run:</b> {ts}</div>
-                <div><b style='color:#C9D1D9;'>Companies:</b> {meta.get('companies_run', '?')}</div>
-                <div><b style='color:#C9D1D9;'>Territory:</b>
-                     {', '.join(meta.get('target_territory', []))}</div>
-                <div><b style='color:#C9D1D9;'>Mode:</b>
-                     <span style='color:{"#3FB950" if meta.get("data_mode")=="LIVE" else "#F97316"};'>
-                     {meta.get('data_mode','?')}</span></div>
+                <div><b style='color:#C9D1D9;'>Companies:</b> {meta.get("companies_run","?")}</div>
+                <div><b style='color:#C9D1D9;'>Territory:</b> {", ".join(meta.get("target_territory",[]))}</div>
+                <div><b style='color:#C9D1D9;'>Mode:</b> <span style='color:{mode_color};font-weight:600;'>{meta.get("data_mode","?")}</span></div>
             </div>
         """, unsafe_allow_html=True)
 
     st.markdown("---")
-    st.markdown('<div style="font-size:0.68rem; color:#6E7681; text-transform:uppercase; letter-spacing:0.1em; margin-bottom:8px;">Filters</div>', unsafe_allow_html=True)
-
-    heat_filter = st.multiselect(
-        "Heat Level",
-        ["HOT", "WARM", "WATCHLIST", "COLD"],
-        default=["HOT", "WARM", "WATCHLIST"],
-    )
-    min_score = st.slider("Min Score", 0, 100, 0)
-
+    st.markdown('<div style="font-size:0.68rem;color:#6E7681;text-transform:uppercase;letter-spacing:0.1em;margin-bottom:8px;">Quick Filters</div>', unsafe_allow_html=True)
+    preset_choice = st.selectbox("", ["— choose —"] + list(PRESET_FILTERS.keys()), label_visibility="collapsed")
     st.markdown("---")
-    page = st.radio(
-        "View",
-        ["🏆 Territory Rankings", "🔍 Account Detail", "📊 Source Quality", "📋 Run a New Scan"],
-        label_visibility="collapsed",
-    )
+    st.markdown('<div style="font-size:0.68rem;color:#6E7681;text-transform:uppercase;letter-spacing:0.1em;margin-bottom:8px;">Manual Filters</div>', unsafe_allow_html=True)
+    heat_options = ["HOT","WARM","WATCHLIST","SIGNAL PENDING","BASE FIT ONLY"]
+    heat_filter  = st.multiselect("Heat Level", heat_options,
+                                   default=["HOT","WARM","WATCHLIST","SIGNAL PENDING","BASE FIT ONLY"])
+    min_score    = st.slider("Min Score", 0, 100, 0)
+    st.markdown("---")
+    page = st.radio("View", ["🏆 Territory Rankings","🔍 Account Detail",
+                              "🔬 Run Live Scan","📊 Source Quality"],
+                    label_visibility="collapsed")
 
+if preset_choice != "— choose —":
+    p = PRESET_FILTERS[preset_choice]
+    heat_filter = p.get("heat", heat_filter)
+    min_score   = p.get("min_score", 0)
 
-# ── No data state ─────────────────────────────────────────────────────────────
-
-if not data:
-    st.markdown("""
-        <div style='text-align:center; padding:80px 40px;'>
-            <div style='font-size:3rem; margin-bottom:16px;'>🎯</div>
-            <div style='font-size:1.3rem; font-weight:600; color:#E6EDF3; margin-bottom:8px;'>
-                No data yet
-            </div>
-            <div style='color:#8B949E; font-size:0.9rem; max-width:480px; margin:0 auto;'>
-                Run the proof script first, then reload this page.
-            </div>
-            <div style='background:#161B22; border:1px solid #21262D; border-radius:8px;
-                        padding:16px; margin:24px auto; max-width:380px;
-                        font-family:monospace; font-size:0.82rem; color:#3FB950; text-align:left;'>
-                python run_proof.py
-            </div>
-        </div>
-    """, unsafe_allow_html=True)
+if not active_data:
+    st.markdown("<div style='text-align:center;padding:80px 40px;'><div style='font-size:3rem;'>🎯</div><div style='font-size:1.3rem;font-weight:600;color:#E6EDF3;'>No data yet</div><div style='color:#8B949E;'>Go to Run Live Scan to collect real signals.</div></div>", unsafe_allow_html=True)
     st.stop()
 
+all_rows = data_to_rows(active_data.get("companies",[]))
+df_all   = pd.DataFrame(all_rows)
 
-# ── Build dataframe ───────────────────────────────────────────────────────────
-
-companies = data.get("companies", [])
-
-rows = []
-for c in companies:
-    sc  = c.get("scores", {})
-    cl  = c.get("collection", {})
-    eg  = c.get("enterprise_gate", {})
-    geo = c.get("geography", {})
-    rows.append({
-        "id":             c.get("company_name",""),
-        "company":        c.get("company_name",""),
-        "industry":       c.get("industry",""),
-        "hq_state":       c.get("hq_state",""),
-        "hq_city":        c.get("hq_city",""),
-        "fortune_rank":   c.get("fortune_rank"),
-        "employees":      c.get("employees",0),
-        "tier":           eg.get("tier","").replace("_"," ").title(),
-        "total_score":    sc.get("total_score", 0),
-        "fit_score":      sc.get("fit_score", 0),
-        "pain_score":     sc.get("pain_score", 0),
-        "timing_score":   sc.get("timing_score", 0),
-        "territory_score":sc.get("territory_score", 0),
-        "meeting_prop":   sc.get("meeting_propensity", 0),
-        "heat_level":     sc.get("heat_level", "COLD"),
-        "surfaced":       sc.get("surfaced", False),
-        "live_signals":   cl.get("live_signals_ingested", 0),
-        "surface_reason": sc.get("surface_reason",""),
-        "hq_in_territory":geo.get("hq_in_territory", False),
-        "score_evidence": sc.get("score_evidence", []),
-        "signals":        c.get("signals", []),
-        "per_source":     cl.get("per_source", {}),
-    })
-
-df = pd.DataFrame(rows)
-
-# Apply filters
-if heat_filter:
-    df = df[df["heat_level"].isin(heat_filter)]
+df = df_all[df_all["display_heat"].isin(heat_filter)].copy()
 df = df[df["total_score"] >= min_score]
-df_sorted = df.sort_values("total_score", ascending=False).reset_index(drop=True)
-
+if preset_choice != "— choose —":
+    p = PRESET_FILTERS[preset_choice]
+    if p.get("states"):
+        target_s = p["states"]
+        df = df[df["hq_state"].isin(target_s) |
+                df["territory_presence"].apply(lambda tp: any(s in (tp or []) for s in target_s))]
+    if p.get("tiers"):
+        df = df[df["tier"].isin(p["tiers"])]
+df = df.sort_values("total_score", ascending=False).reset_index(drop=True)
 
 # ════════════════════════════════════════════════════════════════════
-# PAGE: TERRITORY RANKINGS
+# TERRITORY RANKINGS
 # ════════════════════════════════════════════════════════════════════
-
 if "Rankings" in page:
+    hot     = len(df_all[df_all["display_heat"]=="HOT"])
+    warm    = len(df_all[df_all["display_heat"]=="WARM"])
+    pending = len(df_all[df_all["display_heat"]=="SIGNAL PENDING"])
+    live_total = int(df_all["live_signals"].sum())
 
-    # ── Top metrics ───────────────────────────────────────────────
-    all_df = pd.DataFrame(rows)
-    hot    = len(all_df[all_df["heat_level"] == "HOT"])
-    warm   = len(all_df[all_df["heat_level"] == "WARM"])
-    total  = len(all_df)
-    avg_sc = all_df["total_score"].mean() if len(all_df) else 0
-    live   = all_df["live_signals"].sum()
+    c1,c2,c3,c4,c5 = st.columns(5)
+    c1.metric("Accounts",          len(df_all))
+    c2.metric("🔴 HOT",           hot)
+    c3.metric("🟠 WARM",          warm)
+    c4.metric("🔵 Signal Pending", pending)
+    c5.metric("Live Signals",      live_total)
 
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Accounts",   total)
-    c2.metric("🔴 HOT",    hot)
-    c3.metric("🟠 WARM",   warm)
-    c4.metric("Avg Score",  f"{avg_sc:.0f}")
-    c5.metric("Live Signals", live)
+    if live_total == 0:
+        st.info("💡 **No live signals yet.** Go to **Run Live Scan** to collect real Pain + Timing data. Current scores show Enterprise Fit + Territory only.")
 
     st.markdown("---")
 
-    if df_sorted.empty:
-        st.info("No accounts match the current filters.")
+    if df.empty:
+        st.warning("No accounts match current filters. Try **Show All** in Quick Filters.")
     else:
-        # ── Account cards ─────────────────────────────────────────
-        for _, row in df_sorted.iterrows():
-            heat  = row["heat_level"]
-            color = HEAT_COLOR.get(heat, "#6B7280")
-            emoji = HEAT_EMOJI.get(heat, "⚫")
-            bg    = HEAT_BG.get(heat, "#1A1A1A")
-            score = row["total_score"]
+        for _, row in df.iterrows():
+            heat   = row["display_heat"]
+            color  = HEAT_COLOR.get(heat,"#6B7280")
+            emoji  = HEAT_EMOJI.get(heat,"⬜")
+            bg     = HEAT_BG.get(heat,"#161B22")
+            score  = row["total_score"]
+            buyers = BUYER_TITLES.get(row["industry"],["VP Infrastructure","Director Database Engineering","CIO"])
+            urgency = urgency_explanation(row["raw_heat"], row["live_signals"], score)
+            fit_pct  = int(row["fit_score"]  / 40 * 100)
+            pain_pct = int(row["pain_score"] / 40 * 100)
+            time_pct = int(row["timing_score"]/ 20 * 100)
+            terr_pct = int(row["territory_score"]/ 20 * 100)
+            why_fit  = (f"Fortune {row['fortune_rank']} · " if row["fortune_rank"] else "") + row["tier"]
+            tp = row.get("territory_presence") or []
+            why_terr = (f"HQ in territory ({row['hq_state']})" if row["hq_in_territory"]
+                        else (f"Presence in {', '.join(tp)}" if tp else "No territory presence detected"))
 
-            with st.container():
-                st.markdown(f"""
-                <div style='background:{bg}; border:1px solid {color}33;
-                            border-left:3px solid {color};
-                            border-radius:8px; padding:14px 18px; margin-bottom:10px;'>
-                  <div style='display:flex; justify-content:space-between; align-items:flex-start;'>
-                    <div style='flex:1;'>
-                      <div style='display:flex; align-items:center; gap:10px; margin-bottom:4px;'>
-                        <span style='font-size:1.05rem; font-weight:600; color:#E6EDF3;'>
-                          {emoji} {row['company']}
-                        </span>
-                        <span style='font-size:0.7rem; color:#8B949E; background:#21262D;
-                                     padding:2px 8px; border-radius:20px;'>
-                          {row['industry']}
-                        </span>
-                        {'<span style="font-size:0.7rem; color:#58A6FF; background:#0D2137; padding:2px 8px; border-radius:20px;">F' + str(row['fortune_rank']) + '</span>' if row['fortune_rank'] else ''}
-                      </div>
-                      <div style='font-size:0.78rem; color:#8B949E;'>
-                        📍 {row['hq_city']}, {row['hq_state']}
-                        &nbsp;·&nbsp; {row['tier']}
-                        &nbsp;·&nbsp; {row['employees']:,} employees
-                        &nbsp;·&nbsp; {row['live_signals']} live signals
-                      </div>
-                    </div>
-                    <div style='text-align:right; min-width:80px;'>
-                      <div style='font-size:2rem; font-weight:700;
-                                  font-family:"IBM Plex Mono",monospace; color:{color};
-                                  line-height:1;'>
-                        {score:.0f}
-                      </div>
-                      <div style='font-size:0.65rem; color:#6E7681; text-transform:uppercase;
-                                  letter-spacing:0.1em;'>
-                        {heat}
-                      </div>
-                    </div>
-                  </div>
+            st.markdown(f"""
+<div style='background:{bg};border:1px solid {color}33;border-left:3px solid {color};border-radius:8px;padding:16px 20px;margin-bottom:12px;'>
+  <div style='display:flex;justify-content:space-between;align-items:flex-start;'>
+    <div style='flex:1;'>
+      <div style='display:flex;align-items:center;gap:10px;margin-bottom:4px;flex-wrap:wrap;'>
+        <span style='font-size:1.05rem;font-weight:600;color:#E6EDF3;'>{emoji} {row["company"]}</span>
+        <span style='font-size:0.7rem;color:#8B949E;background:#21262D;padding:2px 8px;border-radius:20px;'>{row["industry"]}</span>
+        {"<span style='font-size:0.7rem;color:#58A6FF;background:#0D2137;padding:2px 8px;border-radius:20px;'>F"+str(row['fortune_rank'])+"</span>" if row["fortune_rank"] else ""}
+        <span style='font-size:0.7rem;color:{color};border:1px solid {color}55;padding:2px 8px;border-radius:20px;font-weight:600;'>{heat}</span>
+      </div>
+      <div style='font-size:0.78rem;color:#8B949E;'>📍 {row["hq_city"]}, {row["hq_state"]} &nbsp;·&nbsp; {row["tier"]} &nbsp;·&nbsp; {row["employees"]:,} employees</div>
+    </div>
+    <div style='text-align:right;min-width:70px;'>
+      <div style='font-size:2.2rem;font-weight:700;font-family:"IBM Plex Mono",monospace;color:{color};line-height:1;'>{score:.0f}</div>
+      <div style='font-size:0.65rem;color:#6E7681;'>/ 100</div>
+    </div>
+  </div>
+  <div style='margin-top:12px;display:grid;grid-template-columns:1fr 1fr;gap:6px 20px;'>
+    <div><div style='display:flex;justify-content:space-between;font-size:0.7rem;margin-bottom:2px;'><span style='color:#6E7681;'>Enterprise Fit</span><span style='color:#58A6FF;font-family:monospace;'>{row["fit_score"]:.0f}/40</span></div><div style='background:#21262D;border-radius:3px;height:5px;'><div style='background:#58A6FF;width:{fit_pct}%;height:5px;border-radius:3px;'></div></div></div>
+    <div><div style='display:flex;justify-content:space-between;font-size:0.7rem;margin-bottom:2px;'><span style='color:#6E7681;'>Database Pain</span><span style='color:#BC8CFF;font-family:monospace;'>{row["pain_score"]:.0f}/40</span></div><div style='background:#21262D;border-radius:3px;height:5px;'><div style='background:#BC8CFF;width:{pain_pct}%;height:5px;border-radius:3px;'></div></div></div>
+    <div><div style='display:flex;justify-content:space-between;font-size:0.7rem;margin-bottom:2px;'><span style='color:#6E7681;'>Timing Signal</span><span style='color:#3FB950;font-family:monospace;'>{row["timing_score"]:.0f}/20</span></div><div style='background:#21262D;border-radius:3px;height:5px;'><div style='background:#3FB950;width:{time_pct}%;height:5px;border-radius:3px;'></div></div></div>
+    <div><div style='display:flex;justify-content:space-between;font-size:0.7rem;margin-bottom:2px;'><span style='color:#6E7681;'>Territory</span><span style='color:#F97316;font-family:monospace;'>{row["territory_score"]:.0f}/20</span></div><div style='background:#21262D;border-radius:3px;height:5px;'><div style='background:#F97316;width:{terr_pct}%;height:5px;border-radius:3px;'></div></div></div>
+  </div>
+  <div style='margin-top:12px;padding-top:10px;border-top:1px solid #21262D;display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;font-size:0.72rem;'>
+    <div><div style='color:#6E7681;margin-bottom:2px;'>Enterprise fit</div><div style='color:#C9D1D9;'>{why_fit}</div></div>
+    <div><div style='color:#6E7681;margin-bottom:2px;'>Territory</div><div style='color:#C9D1D9;'>{why_terr}</div></div>
+    <div><div style='color:#6E7681;margin-bottom:2px;'>Live signals</div><div style='color:{"#3FB950" if row["live_signals"]>0 else "#F97316"};'>{row["live_signals"]} collected</div></div>
+  </div>
+  <div style='margin-top:8px;display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:0.72rem;'>
+    <div><div style='color:#6E7681;margin-bottom:2px;'>Urgency</div><div style='color:#C9D1D9;'>{urgency}</div></div>
+    <div><div style='color:#6E7681;margin-bottom:2px;'>Likely buyers</div><div style='color:#C9D1D9;'>{" · ".join(buyers[:3])}</div></div>
+  </div>
+  {"".join(f'<div style=\"margin-top:4px;font-size:0.71rem;color:#8B949E;\">• {ev}</div>' for ev in row["score_evidence"][:3]) if row["score_evidence"] else ""}
+</div>""", unsafe_allow_html=True)
 
-                  <div style='display:flex; gap:20px; margin-top:10px; padding-top:10px;
-                              border-top:1px solid #21262D;'>
-                    <div style='font-size:0.75rem;'>
-                      <span style='color:#6E7681;'>Fit</span>
-                      <span style='color:#58A6FF; font-family:monospace; font-weight:600;
-                                   margin-left:6px;'>{row['fit_score']:.0f}</span>
-                    </div>
-                    <div style='font-size:0.75rem;'>
-                      <span style='color:#6E7681;'>Pain</span>
-                      <span style='color:#BC8CFF; font-family:monospace; font-weight:600;
-                                   margin-left:6px;'>{row['pain_score']:.0f}</span>
-                    </div>
-                    <div style='font-size:0.75rem;'>
-                      <span style='color:#6E7681;'>Timing</span>
-                      <span style='color:#3FB950; font-family:monospace; font-weight:600;
-                                   margin-left:6px;'>{row['timing_score']:.0f}</span>
-                    </div>
-                    <div style='font-size:0.75rem;'>
-                      <span style='color:#6E7681;'>Territory</span>
-                      <span style='color:#F97316; font-family:monospace; font-weight:600;
-                                   margin-left:6px;'>{row['territory_score']:.0f}</span>
-                    </div>
-                    <div style='font-size:0.75rem; margin-left:auto;'>
-                      <span style='color:#6E7681;'>Mtg propensity</span>
-                      <span style='color:#E6EDF3; font-family:monospace; font-weight:600;
-                                   margin-left:6px;'>{row['meeting_prop']:.0f}</span>
-                    </div>
-                  </div>
-
-                  {"".join(f"<div style='margin-top:6px; font-size:0.72rem; color:#8B949E;'>• {ev}</div>" for ev in row['score_evidence'][:3]) if row['score_evidence'] else ""}
-                </div>
-                """, unsafe_allow_html=True)
-
-        # ── CSV download ──────────────────────────────────────────
         st.markdown("---")
         export_cols = ["company","hq_state","industry","fortune_rank","total_score",
                        "fit_score","pain_score","timing_score","territory_score",
-                       "meeting_prop","heat_level","live_signals","tier"]
-        csv = df_sorted[export_cols].to_csv(index=False)
-        st.download_button(
-            "⬇ Export to CSV",
-            data=csv,
-            file_name=f"tessell_targets_{datetime.now().strftime('%Y%m%d')}.csv",
-            mime="text/csv",
-        )
-
+                       "meeting_prop","display_heat","live_signals","tier"]
+        csv = df[export_cols].rename(columns={"display_heat":"heat_level"}).to_csv(index=False)
+        st.download_button("⬇ Export CSV", data=csv,
+                           file_name=f"tessell_targets_{datetime.now().strftime('%Y%m%d')}.csv",
+                           mime="text/csv")
 
 # ════════════════════════════════════════════════════════════════════
-# PAGE: ACCOUNT DETAIL
+# ACCOUNT DETAIL
 # ════════════════════════════════════════════════════════════════════
-
 elif "Detail" in page:
+    names    = [r["company"] for r in all_rows]
+    selected = st.selectbox("Select account", names)
+    row      = next((r for r in all_rows if r["company"]==selected), None)
+    if not row:
+        st.warning("Not found."); st.stop()
 
-    all_names = [r["company"] for r in rows]
-    selected  = st.selectbox("Select account", all_names)
+    heat   = row["display_heat"]
+    color  = HEAT_COLOR.get(heat,"#6B7280")
+    emoji  = HEAT_EMOJI.get(heat,"⬜")
+    buyers = BUYER_TITLES.get(row["industry"],["VP Infrastructure","Director Database Engineering","CIO"])
 
-    match = next((r for r in rows if r["company"] == selected), None)
-    if not match:
-        st.warning("Account not found.")
-        st.stop()
-
-    heat  = match["heat_level"]
-    color = HEAT_COLOR.get(heat, "#6B7280")
-    emoji = HEAT_EMOJI.get(heat, "⚫")
-
-    # Header
-    col_l, col_r = st.columns([3, 1])
+    col_l, col_r = st.columns([3,1])
     with col_l:
-        st.markdown(f"""
-            <div style='margin-bottom:4px; font-size:0.7rem; color:#6E7681;
-                        text-transform:uppercase; letter-spacing:0.1em;'>
-                {match['industry']} · {match['tier']}
-            </div>
-            <div style='font-size:1.6rem; font-weight:600; color:#E6EDF3;
-                        letter-spacing:-0.02em;'>
-                {emoji} {match['company']}
-            </div>
-            <div style='color:#8B949E; font-size:0.82rem; margin-top:4px;'>
-                {match['hq_city']}, {match['hq_state']}
-                &nbsp;·&nbsp; {match['employees']:,} employees
-                {f"&nbsp;·&nbsp; Fortune {match['fortune_rank']}" if match['fortune_rank'] else ""}
-                &nbsp;·&nbsp; {match['live_signals']} live signals collected
-            </div>
-        """, unsafe_allow_html=True)
+        f_rank = f" &nbsp;·&nbsp; Fortune {row['fortune_rank']}" if row['fortune_rank'] else ""
+        st.markdown(f"<div style='font-size:0.7rem;color:#6E7681;text-transform:uppercase;letter-spacing:0.1em;'>{row['industry']} · {row['tier']}</div><div style='font-size:1.6rem;font-weight:600;color:#E6EDF3;'>{emoji} {row['company']}</div><div style='color:#8B949E;font-size:0.82rem;margin-top:4px;'>📍 {row['hq_city']}, {row['hq_state']} &nbsp;·&nbsp; {row['tier']} &nbsp;·&nbsp; {row['employees']:,} employees{f_rank} &nbsp;·&nbsp; {row['live_signals']} live signals</div>", unsafe_allow_html=True)
     with col_r:
-        st.markdown(f"""
-            <div style='text-align:right; padding-top:8px;'>
-                <div style='font-size:3rem; font-weight:800; color:{color};
-                            font-family:"IBM Plex Mono",monospace; line-height:1;'>
-                    {match['total_score']:.0f}
-                </div>
-                <div style='color:{color}; font-weight:600; font-size:0.9rem;'>
-                    {heat}
-                </div>
-            </div>
-        """, unsafe_allow_html=True)
+        st.markdown(f"<div style='text-align:right;padding-top:8px;'><div style='font-size:3rem;font-weight:800;color:{color};font-family:\"IBM Plex Mono\",monospace;line-height:1;'>{row['total_score']:.0f}</div><div style='color:{color};font-weight:600;font-size:0.9rem;'>{heat}</div></div>", unsafe_allow_html=True)
 
     st.markdown("---")
-
-    # Score breakdown
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Fit",            f"{match['fit_score']:.0f} / 40")
-    c2.metric("Pain",           f"{match['pain_score']:.0f} / 40")
-    c3.metric("Timing",         f"{match['timing_score']:.0f} / 20")
-    c4.metric("Territory",      f"{match['territory_score']:.0f} / 20")
-    c5.metric("Mtg Propensity", f"{match['meeting_prop']:.0f} / 100")
+    c1,c2,c3,c4,c5 = st.columns(5)
+    c1.metric("Fit",f"{row['fit_score']:.0f}/40")
+    c2.metric("Pain",f"{row['pain_score']:.0f}/40")
+    c3.metric("Timing",f"{row['timing_score']:.0f}/20")
+    c4.metric("Territory",f"{row['territory_score']:.0f}/20")
+    c5.metric("Mtg Propensity",f"{row['meeting_prop']:.0f}/100")
 
     st.markdown("---")
-
-    tab1, tab2, tab3 = st.tabs(["📋 Score Evidence", "📡 Signals", "🔌 Source Log"])
+    tab1, tab2, tab3 = st.tabs(["📋 Why This Scored","📡 Signals","👤 Likely Buyers"])
 
     with tab1:
-        if match["score_evidence"]:
-            for ev in match["score_evidence"]:
-                st.markdown(f"""
-                    <div style='background:#161B22; border:1px solid #21262D;
-                                border-left:3px solid #3FB950; border-radius:6px;
-                                padding:8px 14px; margin-bottom:6px; font-size:0.82rem;
-                                color:#C9D1D9;'>
-                        {ev}
-                    </div>
-                """, unsafe_allow_html=True)
-        else:
-            st.info("No score evidence — 0 live signals collected. Run the proof from your laptop to get real signals.")
-
-        st.markdown(f"""
-            <div style='margin-top:12px; background:#161B22; border:1px solid #21262D;
-                        border-radius:6px; padding:10px 14px; font-size:0.78rem; color:#8B949E;'>
-                <b style='color:#C9D1D9;'>Surface decision:</b> {match['surface_reason']}
-            </div>
-        """, unsafe_allow_html=True)
+        col_a, col_b = st.columns(2)
+        tp = row.get("territory_presence") or []
+        why_terr = (f"HQ in territory ({row['hq_state']})" if row["hq_in_territory"]
+                    else (f"Presence in {', '.join(tp)}" if tp else "No territory presence detected"))
+        signal_color = "#3FB950" if row["live_signals"]>0 else "#F97316"
+        signal_msg   = (f"{row['live_signals']} signals collected" if row["live_signals"]>0
+                        else "0 live signals — run a scan to get Pain + Timing scores")
+        urgency = urgency_explanation(row["raw_heat"], row["live_signals"], row["total_score"])
+        with col_a:
+            st.markdown("**Enterprise Fit**")
+            frank2 = f" · Fortune {row['fortune_rank']}" if row['fortune_rank'] else ""
+            st.markdown(f"<div style='background:#161B22;border:1px solid #21262D;border-left:3px solid #58A6FF;border-radius:6px;padding:10px 14px;font-size:0.82rem;color:#C9D1D9;'>{row['tier']}{frank2}<br>{row['employees']:,} employees · {row['industry']}</div>", unsafe_allow_html=True)
+            st.markdown("**Territory Fit**")
+            st.markdown(f"<div style='background:#161B22;border:1px solid #21262D;border-left:3px solid #F97316;border-radius:6px;padding:10px 14px;font-size:0.82rem;color:#C9D1D9;'>{why_terr}</div>", unsafe_allow_html=True)
+        with col_b:
+            st.markdown("**Live Signals Found**")
+            st.markdown(f"<div style='background:#161B22;border:1px solid #21262D;border-left:3px solid {signal_color};border-radius:6px;padding:10px 14px;font-size:0.82rem;color:#C9D1D9;'>{signal_msg}</div>", unsafe_allow_html=True)
+            st.markdown("**Urgency**")
+            st.markdown(f"<div style='background:#161B22;border:1px solid #21262D;border-left:3px solid #EAB308;border-radius:6px;padding:10px 14px;font-size:0.82rem;color:#C9D1D9;'>{urgency}</div>", unsafe_allow_html=True)
+        if row["score_evidence"]:
+            st.markdown("**Score evidence**")
+            for ev in row["score_evidence"]:
+                st.markdown(f"<div style='background:#161B22;border:1px solid #21262D;border-left:3px solid #3FB950;border-radius:6px;padding:8px 14px;margin-bottom:5px;font-size:0.8rem;color:#C9D1D9;'>{ev}</div>", unsafe_allow_html=True)
 
     with tab2:
-        signals = match.get("signals", [])
-        if not signals:
-            st.info("No signals collected. Scores shown are base tier + territory only.")
-            st.markdown("""
-                **Why?** This run was from the Claude sandbox, which blocks all external
-                domains. Run `python run_proof.py` from your laptop to collect real signals.
-            """)
+        sigs = row.get("signals",[])
+        if not sigs:
+            st.info("No signals yet. Run a live scan for this company.")
         else:
-            for sig in signals:
-                cat   = sig.get("signal_type", "")
-                stype = sig.get("source_type", "")
-                conf  = sig.get("confidence_score", 0)
-                kws   = sig.get("extracted_keywords", [])
-                cat_colors = {
-                    "hiring":         "#58A6FF",
-                    "transformation": "#BC8CFF",
-                    "timing":         "#3FB950",
-                    "pain":           "#EF4444",
-                    "news":           "#F97316",
-                }
-                c = cat_colors.get(cat, "#6E7681")
-
+            for sig in sigs:
+                cat = sig.get("signal_type","")
                 with st.expander(f"[{cat.upper()}] {sig.get('raw_snippet','')[:70]}..."):
-                    col_a, col_b = st.columns([3, 1])
-                    with col_a:
-                        st.markdown(f"**Source:** `{stype}`")
-                        st.markdown(f"**Date:** {sig.get('date_found','')}")
-                        st.markdown(f"**State:** {sig.get('state_detected','?')} · **City:** {sig.get('city_detected','?')}")
-                        st.markdown(f"**Keywords:** `{'`, `'.join(kws[:6])}`")
-                        st.markdown(f"**Buyer function:** {sig.get('likely_buyer_function','?')}")
-                        st.markdown("**Snippet:**")
-                        st.code(sig.get("raw_snippet",""), language=None)
-                        if sig.get("source_url"):
-                            st.markdown(f"[View source]({sig['source_url']})")
-                    with col_b:
-                        st.metric("Confidence",   f"{conf:.0%}")
-                        st.metric("Enterprise rel", f"{sig.get('enterprise_relevance_score',0):.0%}")
-                        st.markdown(f"""
-                            <div style='font-size:0.7rem; color:#8B949E; margin-top:8px;'>
-                                <div><b>Parser:</b> {sig.get('parser_used','?')}</div>
-                                <div><b>Method:</b> {sig.get('extraction_method','?')}</div>
-                                <div><b>Live:</b> {sig.get('live_collected',True)}</div>
-                                <div><b>Access:</b> {sig.get('source_access_status','?')}</div>
-                            </div>
-                        """, unsafe_allow_html=True)
+                    st.markdown(f"**Source:** `{sig.get('source_type','')}` · **Date:** {sig.get('date_found','')} · **State:** {sig.get('state_detected','?')}")
+                    st.markdown(f"**Keywords:** `{'`, `'.join(sig.get('extracted_keywords',[])[:6])}`")
+                    st.code(sig.get("raw_snippet",""), language=None)
+                    if sig.get("source_url"):
+                        st.markdown(f"[View source]({sig['source_url']})")
 
     with tab3:
-        per_source = match.get("per_source", {})
-        if not per_source:
-            st.info("No source log available.")
-        else:
-            for src, meta in per_source.items():
-                n      = meta.get("signals_returned", 0)
-                status = meta.get("access_status","?")
-                icon   = "✅" if n > 0 else ("⬜" if status in ("no_slug","not_implemented") else "🚫")
-                proof  = meta.get("proof_url","")
-
-                st.markdown(f"""
-                    <div style='display:flex; justify-content:space-between; align-items:center;
-                                background:#161B22; border:1px solid #21262D; border-radius:6px;
-                                padding:8px 14px; margin-bottom:6px; font-size:0.8rem;'>
-                        <div>
-                            <span style='font-family:monospace; color:#E6EDF3;'>{icon} {src}</span>
-                            <span style='color:#6E7681; margin-left:10px;'>{status}</span>
-                            {f'<span style="color:#8B949E; margin-left:8px; font-size:0.72rem;">{meta.get("limitation","")}</span>' if meta.get("limitation") else ""}
-                        </div>
-                        <div style='font-family:monospace; color:{"#3FB950" if n > 0 else "#6E7681"};
-                                    font-weight:600;'>
-                            {n} signals
-                        </div>
-                    </div>
-                """, unsafe_allow_html=True)
-
-                if proof:
-                    st.caption(f"Endpoint: `{proof}`")
-
+        st.markdown("**Likely buyer titles to target at this account:**")
+        tier_labels = ["Economic Buyer","Technical Champion","Influencer","Influencer"]
+        for i, title in enumerate(buyers[:4]):
+            lbl = tier_labels[i] if i < len(tier_labels) else "Influencer"
+            st.markdown(f"<div style='display:flex;justify-content:space-between;align-items:center;background:#161B22;border:1px solid #21262D;border-radius:6px;padding:10px 14px;margin-bottom:6px;'><span style='font-size:0.85rem;color:#E6EDF3;font-weight:500;'>{title}</span><span style='font-size:0.7rem;color:#6E7681;background:#21262D;padding:2px 8px;border-radius:20px;'>{lbl}</span></div>", unsafe_allow_html=True)
 
 # ════════════════════════════════════════════════════════════════════
-# PAGE: SOURCE QUALITY
+# RUN LIVE SCAN
 # ════════════════════════════════════════════════════════════════════
+elif "Scan" in page:
+    st.markdown("### 🔬 Run Live Signal Scan")
+    st.markdown("Streamlit Cloud has real internet — this runs the signal collector directly here. Greenhouse, Lever, Google News RSS and newsrooms will all work.")
 
+    col1, col2 = st.columns(2)
+    with col1:
+        target_states = st.multiselect("Territory", ["TX","OK","KS","AR","NM","AZ","CO","LA"], default=["TX","OK","KS"])
+        company_subset = st.selectbox("Companies to scan", ["Quick test — 3 companies","TX HQ only (7)","OK + KS HQ (3)","All 25"])
+    with col2:
+        st.markdown("**Sources that will run:**")
+        st.markdown("- Greenhouse job listings (Oracle/DBA/SRE)\n- Lever job listings\n- Google News RSS (transformation, leadership)\n- Company newsroom press releases\n- Careers page HTML scrape")
+
+    if st.button("▶ Run Live Scan", type="primary"):
+        subset_map = {
+            "All 25":                    [c["name"] for c in TARGETS],
+            "TX HQ only (7)":            [c["name"] for c in TARGETS if c["hq_state"]=="TX"],
+            "OK + KS HQ (3)":            [c["name"] for c in TARGETS if c["hq_state"] in ("OK","KS")],
+            "Quick test — 3 companies":  ["McKesson","ONEOK","Cummins"],
+        }
+        companies_to_scan = [c for c in TARGETS if c["name"] in subset_map.get(company_subset,[])]
+
+        progress_bar = st.progress(0)
+        status_text  = st.empty()
+        results_store = []
+        DB_TECH = {"oracle","sql server","postgresql","postgres","mysql","mongodb","aurora","rds","azure sql","db2","mariadb"}
+
+        try:
+            from collectors.live_collectors import collect_all
+            from scoring.scorer import (TessellScorer, enterprise_gate,
+                                        detect_hiring_states, extract_states_from_text)
+            scorer_obj = TessellScorer()
+
+            for i, cd in enumerate(companies_to_scan):
+                name = cd["name"]
+                status_text.markdown(f"🔍 Scanning **{name}** ({i+1}/{len(companies_to_scan)})...")
+
+                col_result = collect_all(
+                    company=name, greenhouse_slug=cd.get("greenhouse_slug"),
+                    careers_url=cd.get("careers_url"), newsroom_url=cd.get("newsroom_url"),
+                    news_terms=cd.get("news_terms"),
+                )
+                signals  = col_result["signals"]
+                all_text = " ".join(
+                    (s.raw_snippet if hasattr(s,"raw_snippet") else s.get("raw_snippet",""))
+                    for s in signals
+                )
+                sc_sigs = []
+                for s in signals:
+                    d  = s.to_dict() if hasattr(s,"to_dict") else s
+                    kw = d.get("extracted_keywords",[])
+                    sc_sigs.append({
+                        "raw_title": d.get("raw_snippet","")[:100],
+                        "raw_excerpt": d.get("raw_snippet",""),
+                        "source_type": d.get("source_type",""),
+                        "signal_category": d.get("signal_type",""),
+                        "keywords_matched": kw,
+                        "database_technologies_mentioned": [k for k in kw if k in DB_TECH],
+                        "signal_state": d.get("state_detected"),
+                        "signal_city": d.get("city_detected"),
+                        "signal_date": d.get("date_found"),
+                        "confidence": d.get("confidence_score",0.7),
+                        "signal_strength": "strong" if d.get("confidence_score",0)>=0.85 else "moderate",
+                    })
+
+                gate = enterprise_gate(
+                    company_name=name, estimated_employees=cd.get("employees"),
+                    all_text=all_text, known_public=bool(cd.get("ticker")),
+                    known_fortune_rank=cd.get("fortune_rank"),
+                )
+                hq_state      = cd.get("hq_state","")
+                hiring_states = detect_hiring_states(sc_sigs)
+                text_states   = extract_states_from_text(all_text)
+                office_states = [s for s in text_states if s != hq_state]
+                signal_states = list(set(
+                    (s.state_detected if hasattr(s,"state_detected") else s.get("state_detected"))
+                    for s in signals
+                    if (s.state_detected if hasattr(s,"state_detected") else s.get("state_detected"))
+                ))
+
+                if gate.passes:
+                    r = scorer_obj.score(
+                        company_name=name, signals=sc_sigs, enterprise_gate_result=gate,
+                        hq_state=hq_state, office_states=office_states,
+                        hiring_states=hiring_states, signal_states=signal_states,
+                        target_states=target_states, industry=cd.get("industry",""),
+                    )
+                    scores = {
+                        "fit_score":r.fit.capped,"pain_score":r.pain.capped,
+                        "timing_score":r.timing.capped,"territory_score":r.territory.capped,
+                        "total_score":r.total_score,"meeting_propensity":r.meeting_propensity,
+                        "heat_level":r.heat_level,"surfaced":r.surfaced,
+                        "surface_reason":r.surface_reason,"score_evidence":r.score_notes,
+                        "fit_rules":r.fit.rules_fired,"pain_rules":r.pain.rules_fired,
+                        "timing_rules":r.timing.rules_fired,"territory_rules":r.territory.rules_fired,
+                    }
+                else:
+                    scores = {"fit_score":0,"pain_score":0,"timing_score":0,"territory_score":0,
+                              "total_score":0,"meeting_propensity":0,"heat_level":"COLD",
+                              "surfaced":False,"surface_reason":f"Gate failed: {gate.reason}",
+                              "score_evidence":[],"fit_rules":[],"pain_rules":[],"timing_rules":[],"territory_rules":[]}
+
+                results_store.append({
+                    "company_name":name,"industry":cd["industry"],
+                    "fortune_rank":cd.get("fortune_rank"),"employees":cd.get("employees"),
+                    "hq_state":hq_state,"hq_city":cd.get("hq_city",""),"ticker":cd.get("ticker",""),
+                    "collection":{
+                        "live_signals_ingested":len(signals),"total_raw":col_result["total_raw"],
+                        "false_positives_removed":col_result["false_positives_removed"],
+                        "per_source":{src:{"signals_returned":m.get("relevant_signals",0),"access_status":m.get("access_status")}
+                                      for src,m in col_result.get("per_source",{}).items()},
+                    },
+                    "enterprise_gate":{"passes":gate.passes,"tier":gate.tier,"reason":gate.reason,"confidence":gate.confidence},
+                    "geography":{
+                        "hq_state":hq_state,"detected_hiring_states":hiring_states,
+                        "detected_office_states":list(set(office_states))[:6],
+                        "signal_states":signal_states,"target_states":target_states,
+                        "hq_in_territory":hq_state in target_states,
+                        "territory_presence":list(set([s for s in hiring_states if s in target_states]+[s for s in office_states if s in target_states])),
+                    },
+                    "scores":scores,
+                    "signals":[s.to_dict() if hasattr(s,"to_dict") else s for s in signals],
+                })
+                progress_bar.progress((i+1)/len(companies_to_scan))
+
+            scan_output = {
+                "run_metadata":{
+                    "timestamp":datetime.utcnow().isoformat(),
+                    "companies_run":len(companies_to_scan),
+                    "target_territory":target_states,
+                    "data_mode":"LIVE",
+                },
+                "companies":results_store,
+            }
+            st.session_state["scan_data"] = scan_output
+            progress_bar.progress(1.0)
+            total_sigs = sum(c["collection"]["live_signals_ingested"] for c in results_store)
+            hot_count  = sum(1 for c in results_store if c["scores"]["heat_level"]=="HOT")
+            warm_count = sum(1 for c in results_store if c["scores"]["heat_level"]=="WARM")
+            status_text.markdown("✅ **Scan complete!**")
+            st.success(f"**{len(results_store)} companies · {total_sigs} live signals · {hot_count} HOT · {warm_count} WARM**")
+            st.info("Switch to **Territory Rankings** to see updated scores. Download JSON below to commit to GitHub for permanent storage.")
+            st.download_button(
+                "⬇ Download proof_output.json",
+                data=json.dumps(scan_output, indent=2, default=str),
+                file_name="proof_output.json", mime="application/json",
+            )
+
+        except Exception as e:
+            st.error(f"Scan error: {e}")
+            st.exception(e)
+
+# ════════════════════════════════════════════════════════════════════
+# SOURCE QUALITY
+# ════════════════════════════════════════════════════════════════════
 elif "Source" in page:
-    st.markdown("### Source Quality Report")
-
-    # Fetch log summary from metadata
-    fetch_log = data.get("run_metadata", {}).get("fetch_log", {})
-    by_status = fetch_log.get("by_status", {})
-    by_source = fetch_log.get("by_source", {})
+    st.markdown("### 📊 Source Quality")
+    fetch_log  = active_data.get("run_metadata",{}).get("fetch_log",{})
+    by_status  = fetch_log.get("by_status",{}) if fetch_log else {}
 
     if fetch_log:
-        st.markdown("#### URL Access Summary")
-        c1, c2, c3 = st.columns(3)
-        c1.metric("URLs Tried",    fetch_log.get("total_urls_tried", 0))
-        c2.metric("Success Rate",  f"{fetch_log.get('success_rate', 0):.1f}%")
-        c3.metric("Successful",    by_status.get("success", 0))
-
+        c1,c2,c3 = st.columns(3)
+        c1.metric("URLs Tried",   fetch_log.get("total_urls_tried",0))
+        c2.metric("Success Rate", f"{fetch_log.get('success_rate',0):.1f}%")
+        c3.metric("Successful",   by_status.get("success",0))
         st.markdown("---")
-
         if by_status:
-            st.markdown("#### Status Breakdown")
-            status_rows = [{"Status": k, "Count": v} for k, v in sorted(by_status.items(), key=lambda x: -x[1])]
-            status_df   = pd.DataFrame(status_rows)
-            st.dataframe(status_df, use_container_width=True, hide_index=True)
-
-        if by_source:
-            st.markdown("#### Per-Source Access")
-            src_rows = []
-            for src, d in by_source.items():
-                src_rows.append({
-                    "Source":       src,
-                    "Tried":        d.get("tried", 0),
-                    "Success":      d.get("success", 0),
-                    "Blocked":      d.get("blocked", 0),
-                    "Failed":       d.get("failed", 0),
-                    "Success Rate": f"{d['success']/d['tried']*100:.0f}%" if d.get("tried") else "0%",
-                })
-            src_df = pd.DataFrame(src_rows)
-            st.dataframe(src_df, use_container_width=True, hide_index=True)
-
+            st.dataframe(pd.DataFrame([{"Status":k,"Count":v} for k,v in sorted(by_status.items(),key=lambda x:-x[1])]),
+                         use_container_width=True, hide_index=True)
     else:
-        st.info("No fetch log in this run.")
+        st.info("No fetch log in current data. Run a live scan to see source quality.")
 
     st.markdown("---")
-    st.markdown("#### Why 0% success rate in this output file")
-    st.markdown("""
-    This `proof_output.json` was generated inside the Claude sandbox, which restricts
-    outbound HTTP to a whitelist of package registries only.
-
-    **What you'll see when you run from your laptop:**
-    - Greenhouse API → returns structured JSON job listings
-    - Google News RSS → returns 5–15 news items per company
-    - Company newsrooms → returns press release titles + excerpts
-    - Careers pages (static) → returns job listings
-
-    **Run this to get real data:**
-    ```bash
-    cd tessell-local
-    python run_proof.py
-    ```
-    Then copy the new `proof_output.json` into this repo and redeploy.
-    """)
-
-
-# ════════════════════════════════════════════════════════════════════
-# PAGE: RUN NEW SCAN
-# ════════════════════════════════════════════════════════════════════
-
-elif "Scan" in page:
-    st.markdown("### Run a New Scan")
-    st.info("""
-    **This page is for reference only in the cloud version.**
-    The signal collector runs as a Python script on your local machine or a server,
-    not inside the Streamlit app itself. After running it, upload the new
-    `proof_output.json` to this repo and redeploy.
-    """)
-
-    st.markdown("#### Steps to update this dashboard with fresh data")
-
-    steps = [
-        ("1. Run the collector locally",
-         "```bash\ncd tessell-local\npython run_proof.py\n```"),
-        ("2. Copy the output file",
-         "```bash\ncp reports/proof_output.json ../tessell-streamlit/proof_output.json\n```"),
-        ("3. Commit and push to GitHub",
-         "```bash\ngit add proof_output.json\ngit commit -m 'update: fresh signal run'\ngit push\n```"),
-        ("4. Streamlit Cloud auto-redeploys",
-         "Streamlit Cloud watches your repo. The dashboard updates within ~60 seconds of the push."),
-    ]
-
-    for title, body in steps:
-        with st.expander(title):
-            st.markdown(body)
-
-    st.markdown("---")
-    st.markdown("#### Current data file info")
-    meta = data.get("run_metadata", {})
-    st.json({
-        "timestamp":        meta.get("timestamp",""),
-        "companies_run":    meta.get("companies_run",0),
-        "data_mode":        meta.get("data_mode",""),
-        "target_territory": meta.get("target_territory",[]),
-        "elapsed_seconds":  meta.get("elapsed_seconds",0),
-    })
+    st.markdown("**Signal coverage by company**")
+    coverage = [{"Company":r["company"],"Live Signals":r["live_signals"],
+                 "Score":f"{r['total_score']:.0f}","Heat":r["display_heat"]} for r in all_rows]
+    st.dataframe(pd.DataFrame(coverage).sort_values("Live Signals",ascending=False),
+                 use_container_width=True, hide_index=True)
