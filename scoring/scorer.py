@@ -1,36 +1,40 @@
 """
-scoring/scorer.py  — v2
+scoring/scorer.py  — v3  (Tessell buying signals first)
 ════════════════════════════════════════════════════════════════════
-EXACT SCORING LOGIC — every weight is documented and justified.
+SCORING MODEL — rebuilt to rank by likelihood to buy Tessell NOW.
 
 Score Architecture:
-  Fit Score     0–40   Is this company a good structural fit for Tessell?
-  Pain Score    0–40   Does evidence suggest database operational pain?
-  Timing Score  0–20   Is now a better time than 6 months ago?
-  Territory     0–20   Is this company in the seller's territory?
-  ──────────────────
-  Total         0–100
+  Tier 1 — Immediate Buying Signals  (0-55)
+    Oracle/DB operational pain:          0-20
+    DBA / platform / SRE hiring surge:   0-15
+    Backup / DR / automation signals:    0-10
+    Cloud migration / modernization:     0-10
+
+  Tier 2 — Urgency Multipliers  (0-25)
+    CIO/CTO/VP Infra leadership change:  0-10
+    M&A / acquisition complexity:        0-8
+    Multi-region / rapid expansion:      0-4
+    Security / compliance pressure:      0-3
+
+  Tier 3 — Context Boosters  (0-20)
+    Enterprise size / tier:              0-8   (gating signal, not primary)
+    Industry fit:                        0-7
+    Mission critical environment:        0-5
+
+  Territory  (0-15)
+    HQ in territory:                     0-6
+    Office / hiring / signal in terr:    0-9
+
+  Penalties (new)
+    Stale signals only (>90d):           -10 max
+    Fortune rank only, no signals:       -5
+    DB technology vendor / seller:       -15
 
 Heat Levels:
-  HOT       ≥ 85   Immediate outreach — strong fit + timing trigger
-  WARM      ≥ 70   Prioritize — good fit, some timing signal
-  WATCHLIST ≥ 55   Monitor — good fit, low urgency
-  COLD       < 55  Deprioritize
-
-Enterprise Hard Gate (applied BEFORE scoring):
-  - Estimated employees < 500      → EXCLUDED
-  - No infrastructure signals AND  → EXCLUDED
-    employees unknown AND
-    no enterprise keywords
-
-Meeting Propensity Score (0–100):
-  Composite of:
-    - Account heat level
-    - Number of timing signals
-    - Whether hiring signals are recent (< 30 days)
-    - Whether a leadership change was detected
-    - Whether a transformation announcement was made
-  Used to rank "call this week" vs "nurture"
+  HOT       ≥ 80   Call this week — strong buying signals
+  WARM      ≥ 60   Prioritize — good signals, some timing
+  WATCHLIST ≥ 40   Monitor — qualifies but weak signals
+  COLD       < 40  Deprioritize
 """
 
 from __future__ import annotations
@@ -40,152 +44,218 @@ from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Tuple
 from datetime import datetime, timedelta
 
-# ── Keyword pools ────────────────────────────────────────────────────
+# ════════════════════════════════════════════════════════════════════
+# TIER 1 KEYWORD POOLS — Tessell buying signals
+# ════════════════════════════════════════════════════════════════════
 
-DB_TECHNOLOGIES = {
-    "oracle":      10,   # Highest weight — biggest Tessell opportunity
-    "sql server":   8,
-    "mssql":        8,
-    "postgres":     7,
-    "postgresql":   7,
-    "mysql":        6,
-    "mongodb":      6,
-    "mariadb":      5,
-    "aurora":       5,
-    "rds":          5,
-    "db2":          5,
-    "sybase":       4,
-    "cassandra":    4,
-    "teradata":     4,
-    "snowflake":    3,
-    "azure sql":    6,
-    "google cloud sql": 5,
+# Oracle/DB pain — weighted by how directly they indicate Tessell need
+DB_PAIN_KEYWORDS = {
+    # Direct Oracle signals (highest weight)
+    "oracle dba":               8,
+    "oracle rac":               8,
+    "oracle exadata":           8,
+    "oracle licensing":         7,
+    "oracle cost":              7,
+    "oracle migration":         7,
+    "oracle database":          5,
+    "oracle":                   4,
+    # SQL Server signals
+    "sql server dba":           6,
+    "sql server":               4,
+    "mssql":                    4,
+    # PostgreSQL / MySQL
+    "postgres dba":             5,
+    "postgresql":               4,
+    "postgres":                 4,
+    "mysql dba":                4,
+    "mysql":                    3,
+    # Database operations pain
+    "dba toil":                 8,
+    "manual dba":               7,
+    "database toil":            6,
+    "dba overhead":             6,
+    "dba backlog":              6,
+    "database sprawl":          7,
+    "provisioning delay":       6,
+    "slow provisioning":        6,
+    "environment refresh":      5,
+    "non-production database":  5,
+    "non-prod":                 4,
+    "database clone":           6,
+    "database cloning":         6,
+    "copy data":                5,
+    # Other DB technologies (signal presence, not Oracle-specific)
+    "mongodb":                  3,
+    "mariadb":                  3,
+    "aurora":                   3,
+    "rds":                      3,
+    "db2":                      3,
+    "azure sql":                4,
+    "database infrastructure":  3,
 }
 
-PAIN_KEYWORDS = {
-    # DBA toil — direct evidence
-    "manual dba":           4,
-    "dba overhead":         4,
-    "dba backlog":          4,
-    "dba toil":             4,
-    "database toil":        3,
-    "manual database":      3,
-    "manual operations":    2,
-    # Provisioning pain
-    "provisioning delay":   4,
-    "slow provisioning":    4,
-    "environment refresh":  3,
-    "non-prod":             3,
-    "non-production":       3,
-    "dev/test":             3,
-    "database clone":       4,
-    "database cloning":     4,
-    "copy data":            3,
-    # Backup/DR/HA
-    "disaster recovery":    3,
-    "backup":               2,
-    "high availability":    3,
-    "failover":             3,
-    "rpo":                  3,
-    "rto":                  3,
-    "data loss":            3,
-    "downtime":             2,
-    # Cost pressure
-    "oracle cost":          4,
-    "license cost":         3,
-    "licensing cost":       3,
-    "cloud cost":           2,
-    "cost reduction":       2,
-    "cost optimization":    2,
-    # Compliance
-    "compliance":           2,
-    "audit":                2,
-    "governance":           2,
-    "hipaa":                3,
-    "pci":                  3,
-    "soc 2":                3,
-}
-
-HIRING_KEYWORDS = {
-    "database administrator":   4,
-    "dba":                      4,
-    "database engineer":        4,
-    "database reliability":     5,
-    "dbre":                     5,
+# Hiring keywords — active DBA/platform hiring = active pain
+DB_HIRING_KEYWORDS = {
+    "oracle dba":               8,
+    "senior oracle dba":        8,
+    "oracle database administrator": 7,
+    "sql server dba":           7,
+    "database reliability engineer": 8,
+    "dbre":                     8,
+    "database platform engineer": 7,
+    "database engineer":        5,
+    "database administrator":   5,
+    "dba":                      5,
+    "database architect":       5,
+    "database devops":          6,
+    "database automation":      6,
+    "platform engineer":        4,
+    "site reliability engineer": 4,
+    "sre":                      4,
+    "database operations":      5,
     "cloud database":           4,
-    "database platform":        4,
-    "platform engineer":        3,
-    "site reliability engineer":4,
-    "sre":                      3,
-    "database architect":       3,
-    "data infrastructure":      3,
-    "oracle dba":               5,
-    "sql server dba":           5,
-    "postgres dba":             4,
-    "database operations":      4,
-    "database devops":          4,
-    "database automation":      4,
+    "data infrastructure":      4,
 }
 
-TRANSFORMATION_KEYWORDS = {
-    "cloud migration":           3,
-    "cloud transformation":      3,
-    "digital transformation":    2,
-    "data center exit":          4,
-    "data center migration":     4,
-    "legacy modernization":      3,
-    "app modernization":         3,
-    "erp modernization":         3,
-    "platform engineering":      3,
-    "devops transformation":     2,
-    "infrastructure modernization": 3,
-    "oracle migration":          5,
-    "database migration":        4,
-    "database modernization":    4,
+# Backup/DR/automation keywords
+OPERATIONAL_KEYWORDS = {
+    "disaster recovery":        5,
+    "backup and recovery":      5,
+    "backup":                   3,
+    "high availability":        4,
+    "failover":                 4,
+    "rpo":                      4,
+    "rto":                      4,
+    "data loss":                4,
+    "downtime":                 3,
+    "database automation":      6,
+    "automated database":       5,
+    "database-as-a-service":    7,
+    "dbaas":                    7,
+    "self-service database":    6,
+    "database provisioning":    5,
+    "resilience":               3,
+    "zero downtime":            4,
+    "always-on":                4,
 }
 
-TIMING_KEYWORDS = {
-    "new cio":                   6,
-    "new cto":                   6,
-    "new vp infrastructure":     5,
-    "new vp engineering":        5,
-    "named cio":                 6,
-    "named cto":                 6,
-    "appointed":                 3,
-    "joins as":                  3,
-    "hired as":                  3,
-    "acquisition":               4,
-    "acquired":                  4,
-    "merger":                    4,
-    "merges":                    4,
-    "restructuring":             3,
-    "transformation program":    3,
-    "modernization initiative":  3,
-    "cloud first strategy":      3,
-    "announced partnership":     2,
-    "microsoft partnership":     3,
-    "aws partnership":           3,
-    "azure partnership":         3,
+# Cloud/modernization keywords
+MODERNIZATION_KEYWORDS = {
+    "oracle migration":         8,
+    "database migration":       6,
+    "database modernization":   6,
+    "cloud migration":          5,
+    "cloud transformation":     5,
+    "data center exit":         7,
+    "data center migration":    6,
+    "legacy modernization":     5,
+    "erp modernization":        5,
+    "erp migration":            5,
+    "sap migration":            4,
+    "platform engineering":     4,
+    "devops transformation":    4,
+    "infrastructure modernization": 4,
+    "digital transformation":   3,
+    "cloud first":              4,
 }
 
-ENTERPRISE_POSITIVE = {
-    "fortune":                  8,
-    "global operations":        6,
-    "multinational":            5,
-    "data center":              4,
-    "mission critical":         5,
-    "enterprise":               3,
-    "large scale":              3,
-    "24/7":                     4,
-    "uptime sla":               4,
+# ════════════════════════════════════════════════════════════════════
+# TIER 2 KEYWORD POOLS — Urgency multipliers
+# ════════════════════════════════════════════════════════════════════
+
+LEADERSHIP_TIMING_KEYWORDS = {
+    "new cio":                  8,
+    "new cto":                  8,
+    "new vp infrastructure":    7,
+    "new vp engineering":       7,
+    "new vp technology":        7,
+    "new chief information":    8,
+    "new chief technology":     8,
+    "named cio":                8,
+    "named cto":                8,
+    "appointed cio":            8,
+    "appointed cto":            8,
+    "joins as cio":             7,
+    "joins as cto":             7,
+    "hired as cio":             7,
+    "new head of infrastructure": 6,
+    "new head of engineering":  6,
+    "new head of technology":   6,
+}
+
+MA_KEYWORDS = {
+    "acquisition":              5,
+    "acquired":                 5,
+    "merger":                   5,
+    "merges":                   5,
+    "acquires":                 5,
+    "divest":                   3,
+    "divestiture":              3,
+    "carve-out":                4,
+    "spin-off":                 3,
+    "integration":              3,
+    "post-merger":              5,
+    "database consolidation":   6,
+}
+
+EXPANSION_KEYWORDS = {
+    "rapid expansion":          3,
+    "multi-region":             4,
+    "global expansion":         3,
+    "new data center":          4,
+    "expanding operations":     3,
+    "scaling infrastructure":   3,
+    "hypergrowth":              3,
+    "aggressive growth":        3,
+}
+
+COMPLIANCE_KEYWORDS = {
+    "hipaa":                    3,
+    "pci dss":                  3,
+    "pci":                      2,
+    "soc 2":                    3,
+    "fedramp":                  3,
+    "gdpr":                     2,
+    "data sovereignty":         3,
+    "audit":                    2,
+    "regulatory compliance":    2,
+    "data governance":          2,
+}
+
+# ════════════════════════════════════════════════════════════════════
+# TIER 3 — Context / qualification
+# ════════════════════════════════════════════════════════════════════
+
+ENTERPRISE_CONTEXT_KEYWORDS = {
+    "fortune":                  4,
+    "global operations":        3,
+    "mission critical":         4,
+    "24/7":                     3,
+    "uptime sla":               3,
     "production systems":       3,
-    "regulated":                4,
-    "hipaa":                    5,
-    "pci dss":                  5,
-    "soc 2":                    4,
-    "fedramp":                  5,
-    "iso 27001":                4,
+    "enterprise":               2,
+    "data center":              2,
 }
+
+# Industry fit — industries with heaviest Oracle / legacy DB footprint
+HIGH_FIT_INDUSTRIES  = [
+    "financial","banking","insurance","healthcare","hospital","pharma",
+    "government","defense","federal","energy","utility","airline","aviation",
+]
+MED_FIT_INDUSTRIES   = [
+    "manufacturing","automotive","aerospace","logistics","transportation",
+    "telecom","telecommunications","retail","distribution","supply chain",
+]
+
+# Penalty: DB vendors / technology sellers
+DB_VENDOR_SIGNALS = [
+    "database software", "database vendor", "database platform provider",
+    "oracle partner", "sql server partner", "selling database",
+    "database product", "we sell", "our database product",
+]
+
+# Penalty: stale signal age threshold
+STALE_SIGNAL_DAYS = 90
 
 # Things that suggest SMB — reduce score or exclude
 SMB_SIGNALS = [
@@ -541,7 +611,7 @@ def detect_office_states(signals: List[Dict], hq_state: Optional[str]) -> List[s
 # Max total territory boost = 20 points
 
 TERRITORY_BOOST_RULES = {
-    "hq_in_territory":        8,   # Company HQ is in seller's state(s)
+    "hq_in_territory":        6,   # Company HQ is in seller's state(s)
     "major_office_in_territory": 5, # Non-HQ major office in territory
     "active_hiring_in_territory": 4, # Job postings in territory (last 30d)
     "recent_signal_in_territory": 3, # News/press signal from territory
@@ -605,8 +675,8 @@ def score_territory(
         notes.append(f"Recent signals from territory ({', '.join(signal_matches)}) +{pts}pts")
         total += pts
 
-    capped = min(20.0, total)
-    bd = ScoreBreakdown(raw=total, capped=capped, max_possible=20, rules_fired=rules_fired)
+    capped = min(15.0, total)
+    bd = ScoreBreakdown(raw=total, capped=capped, max_possible=15, rules_fired=rules_fired)
     return bd, notes
 
 
@@ -616,6 +686,10 @@ def score_territory(
 
 MIN_SURFACE_SCORE = 55   # Below this → not surfaced at all
 HEAT_THRESHOLDS = {"HOT": 85, "WARM": 70, "WATCHLIST": 55}
+
+
+MIN_SURFACE_SCORE = 40   # Below this → not surfaced (was 55, lowered since scale changed)
+HEAT_THRESHOLDS = {"HOT": 80, "WARM": 60, "WATCHLIST": 40}
 
 
 class TessellScorer:
@@ -634,18 +708,27 @@ class TessellScorer:
     ) -> FullScoreResult:
 
         all_text = self._signals_to_text(signals)
-        notes = []
+        notes    = []
 
-        # ── FIT (0–40) ───────────────────────────────────────────────
-        fit = self._score_fit(all_text, enterprise_gate_result, industry, signals, notes)
+        # ── TIER 1: Immediate buying signals ────────────────────────
+        t1_pain  = self._score_db_pain(all_text, signals, notes)
+        t1_hire  = self._score_hiring(all_text, signals, notes)
+        t1_ops   = self._score_operational(all_text, notes)
+        t1_mod   = self._score_modernization(all_text, notes)
+        tier1    = t1_pain.capped + t1_hire.capped + t1_ops.capped + t1_mod.capped
 
-        # ── PAIN (0–40) ──────────────────────────────────────────────
-        pain = self._score_pain(all_text, signals, notes)
+        # ── TIER 2: Urgency multipliers ──────────────────────────────
+        t2_lead  = self._score_leadership(all_text, signals, notes)
+        t2_ma    = self._score_ma(all_text, notes)
+        t2_urg   = self._score_urgency_context(all_text, notes)
+        recent_boost = self._recent_hiring_boost(signals, notes)
+        tier2    = t2_lead.capped + t2_ma.capped + t2_urg.capped + recent_boost
 
-        # ── TIMING (0–20) ────────────────────────────────────────────
-        timing = self._score_timing(all_text, signals, notes)
+        # ── TIER 3: Context / qualification ─────────────────────────
+        t3_ctx   = self._score_context(all_text, enterprise_gate_result, industry, notes)
+        tier3    = t3_ctx.capped
 
-        # ── TERRITORY (0–20) ─────────────────────────────────────────
+        # ── TERRITORY (0-15) ─────────────────────────────────────────
         territory, terr_notes = score_territory(
             hq_state=hq_state,
             office_states=office_states or [],
@@ -655,8 +738,12 @@ class TessellScorer:
         )
         notes.extend(terr_notes)
 
+        # ── PENALTIES ────────────────────────────────────────────────
+        penalty  = self._score_penalties(all_text, signals, notes)
+
         # ── TOTAL ────────────────────────────────────────────────────
-        total = min(100.0, fit.capped + pain.capped + timing.capped + territory.capped)
+        raw_total = tier1 + tier2 + tier3 + territory.capped + penalty
+        total     = max(0.0, min(100.0, raw_total))
 
         # ── HEAT LEVEL ───────────────────────────────────────────────
         heat = "COLD"
@@ -665,14 +752,32 @@ class TessellScorer:
                 heat = level
                 break
 
-        # ── MEETING PROPENSITY (0–100) ───────────────────────────────
-        mp = self._meeting_propensity(total, timing, signals)
+        # ── MEETING PROPENSITY ───────────────────────────────────────
+        mp = self._meeting_propensity(total, tier1, tier2, signals)
 
         # ── SURFACE DECISION ─────────────────────────────────────────
-        surfaced = total >= MIN_SURFACE_SCORE
+        surfaced       = total >= MIN_SURFACE_SCORE
         surface_reason = (
             f"Score {total:.0f} ≥ threshold {MIN_SURFACE_SCORE}" if surfaced
             else f"Score {total:.0f} < threshold {MIN_SURFACE_SCORE}"
+        )
+
+        # Build legacy-compatible score breakdowns for UI
+        # Map new tiers to old Fit/Pain/Timing/Territory structure
+        fit = ScoreBreakdown(
+            raw=tier3, capped=min(40, tier3 + t1_pain.capped * 0.3),
+            max_possible=40,
+            rules_fired=t3_ctx.rules_fired,
+        )
+        pain = ScoreBreakdown(
+            raw=tier1, capped=min(40, tier1),
+            max_possible=40,
+            rules_fired=t1_pain.rules_fired + t1_hire.rules_fired + t1_ops.rules_fired + t1_mod.rules_fired,
+        )
+        timing = ScoreBreakdown(
+            raw=tier2, capped=min(20, tier2),
+            max_possible=20,
+            rules_fired=t2_lead.rules_fired + t2_ma.rules_fired + t2_urg.rules_fired,
         )
 
         confidence = self._confidence(signals, enterprise_gate_result)
@@ -688,235 +793,309 @@ class TessellScorer:
             score_notes=notes,
         )
 
-    # ── FIT scoring ──────────────────────────────────────────────────
 
-    def _score_fit(self, text: str, gate: EnterpriseGateResult,
-                   industry: Optional[str], signals: List[Dict], notes: List[str]) -> ScoreBreakdown:
-        rules = []
-        total = 0.0
+    # ── TIER 1: Oracle/DB pain (0-20) ────────────────────────────────
 
-        # 1. Enterprise tier base (0–15)
-        tier_pts = {
-            "fortune_500": 15, "fortune_1000": 12,
-            "large_enterprise": 9, "large_private": 6,
-            "upper_midmarket": 3, "excluded": 0,
-        }.get(gate.tier, 0)
-        if tier_pts:
-            rules.append({"rule": "enterprise_tier", "points": tier_pts,
-                          "evidence": f"Tier: {gate.tier} → {tier_pts}pts"})
-            notes.append(f"Enterprise tier ({gate.tier}): +{tier_pts}pts")
-            total += tier_pts
-
-        # 2. Database technology signals (0–12, weighted by DB)
-        db_score = 0.0
-        found_dbs = []
-        for kw, weight in DB_TECHNOLOGIES.items():
-            if kw in text.lower():
-                found_dbs.append(kw)
-                db_score += weight
-        db_score = min(12, db_score)
-        if db_score > 0:
-            rules.append({"rule": "database_technologies", "points": db_score,
-                          "evidence": f"DBs found: {found_dbs}"})
-            notes.append(f"Database technologies ({', '.join(found_dbs[:3])}): +{db_score:.0f}pts")
-            total += db_score
-
-        # 3. Regulated industry (0–6)
-        reg_pts = 0.0
-        high_reg = ["financial","banking","insurance","healthcare","hospital",
-                    "pharma","government","defense","federal","energy","utility","airline"]
-        mid_reg  = ["manufacturing","automotive","aerospace","logistics","telecom","retail"]
-        if industry:
-            ind_l = industry.lower()
-            if any(r in ind_l for r in high_reg):
-                reg_pts = 6
-            elif any(r in ind_l for r in mid_reg):
-                reg_pts = 3
-        if reg_pts:
-            rules.append({"rule": "regulated_industry", "points": reg_pts,
-                          "evidence": f"Industry: {industry}"})
-            notes.append(f"Regulated industry ({industry}): +{reg_pts:.0f}pts")
-            total += reg_pts
-
-        # 4. Infrastructure complexity signals (0–5)
-        infra_markers = ["multi-cloud","hybrid cloud","kubernetes","terraform",
-                         "microservices","distributed systems","global infrastructure",
-                         "data center","multiple regions","on-premises","on-prem"]
-        infra_score = min(5, sum(1.25 for m in infra_markers if m in text.lower()))
-        if infra_score:
-            rules.append({"rule": "infra_complexity", "points": infra_score,
-                          "evidence": "Infrastructure complexity markers found"})
-            notes.append(f"Infrastructure complexity: +{infra_score:.0f}pts")
-            total += infra_score
-
-        # 5. Mission critical signals (0–4)
-        mc_markers = ["mission critical","24/7","zero downtime","high availability",
-                      "uptime sla","tier 1","production systems","always-on"]
-        mc_score = min(4, sum(1.33 for m in mc_markers if m in text.lower()))
-        if mc_score:
-            rules.append({"rule": "mission_critical", "points": mc_score,
-                          "evidence": "Mission-critical environment signals"})
-            total += mc_score
-
-        capped = min(40.0, total)
-        return ScoreBreakdown(raw=total, capped=capped, max_possible=40, rules_fired=rules)
-
-    # ── PAIN scoring ─────────────────────────────────────────────────
-
-    def _score_pain(self, text: str, signals: List[Dict], notes: List[str]) -> ScoreBreakdown:
+    def _score_db_pain(self, text: str, signals: List[Dict], notes: List[str]) -> ScoreBreakdown:
         rules = []
         total = 0.0
         text_l = text.lower()
 
-        # 1. Pain keyword matching (weighted)
-        pain_score = 0.0
-        triggered_pain = []
-        for kw, weight in PAIN_KEYWORDS.items():
+        pain_pts = 0.0
+        hit_kws = []
+        for kw, w in DB_PAIN_KEYWORDS.items():
             if kw in text_l:
-                pain_score += weight
-                triggered_pain.append(kw)
-        pain_score = min(15, pain_score)
-        if pain_score:
-            rules.append({"rule": "pain_keywords", "points": pain_score,
-                          "evidence": f"Pain keywords: {triggered_pain[:5]}"})
-            notes.append(f"Pain signals detected ({', '.join(triggered_pain[:3])}): +{pain_score:.0f}pts")
-            total += pain_score
-
-        # 2. Hiring for database/SRE roles (0–12)
-        hire_signals = [s for s in signals if s.get("signal_category") == "hiring"]
-        hire_score = 0.0
-        for sig in hire_signals:
-            title = sig.get("raw_title", "").lower()
-            for kw, weight in HIRING_KEYWORDS.items():
-                if kw in title:
-                    hire_score += weight
-                    break  # One weight per signal
-        hire_score = min(12, hire_score)
-        if hire_score:
-            rules.append({"rule": "db_sre_hiring", "points": hire_score,
-                          "evidence": f"{len(hire_signals)} DB/SRE job signals"})
-            notes.append(f"Database/SRE hiring ({len(hire_signals)} roles): +{hire_score:.0f}pts")
-            total += hire_score
-
-        # 3. Transformation / modernization language (0–8)
-        trans_score = 0.0
-        for kw, weight in TRANSFORMATION_KEYWORDS.items():
-            if kw in text_l:
-                trans_score += weight
-        trans_score = min(8, trans_score)
-        if trans_score:
-            rules.append({"rule": "modernization_language", "points": trans_score,
-                          "evidence": "Cloud/database modernization language"})
-            notes.append(f"Modernization language: +{trans_score:.0f}pts")
-            total += trans_score
-
-        # 4. Cost pressure (0–5)
-        cost_markers = ["oracle cost","license cost","licensing cost",
-                        "cloud cost","cost reduction","cost optimization","finops"]
-        cost_score = min(5, sum(1.25 for m in cost_markers if m in text_l))
-        if cost_score:
-            rules.append({"rule": "cost_pressure", "points": cost_score,
-                          "evidence": "Cost pressure / optimization language"})
-            total += cost_score
-
-        capped = min(40.0, total)
-        return ScoreBreakdown(raw=total, capped=capped, max_possible=40, rules_fired=rules)
-
-    # ── TIMING scoring ───────────────────────────────────────────────
-
-    def _score_timing(self, text: str, signals: List[Dict], notes: List[str]) -> ScoreBreakdown:
-        rules = []
-        total = 0.0
-        text_l = text.lower()
-
-        # 1. Leadership change (0–8)
-        lead_score = 0.0
-        for kw, weight in TIMING_KEYWORDS.items():
-            if kw in text_l:
-                lead_score += weight
-        lead_score = min(8, lead_score)
-        if lead_score:
-            rules.append({"rule": "timing_keywords", "points": lead_score,
-                          "evidence": "Leadership change or transformation announcement"})
-            notes.append(f"Timing trigger detected (leadership/transformation): +{lead_score:.0f}pts")
-            total += lead_score
-
-        # 2. Recent hiring (< 30 days) (0–6)
-        cutoff_30 = datetime.utcnow() - timedelta(days=30)
-        recent_hire_count = 0
-        for sig in signals:
-            if sig.get("signal_category") != "hiring":
-                continue
-            date_str = sig.get("signal_date")
-            if not date_str:
-                recent_hire_count += 0.5  # Partial — undated but recent collection
-                continue
-            try:
-                sig_date = datetime.fromisoformat(str(date_str).replace("Z", "+00:00"))
-                if sig_date.replace(tzinfo=None) >= cutoff_30:
-                    recent_hire_count += 1
-            except Exception:
-                recent_hire_count += 0.3
-
-        recent_pts = min(6, recent_hire_count * 2)
-        if recent_pts:
-            rules.append({"rule": "recent_hiring", "points": recent_pts,
-                          "evidence": f"{recent_hire_count:.0f} hiring signals in last 30d"})
-            notes.append(f"Recent hiring activity ({recent_hire_count:.0f} roles < 30d): +{recent_pts:.0f}pts")
-            total += recent_pts
-
-        # 3. Press release / announcement (0–4)
-        announcement_signals = [s for s in signals if s.get("source_type") in
-                                 ("press_release", "ir_page", "news")]
-        if announcement_signals:
-            ann_pts = min(4, len(announcement_signals) * 2)
-            rules.append({"rule": "announcements", "points": ann_pts,
-                          "evidence": f"{len(announcement_signals)} press/news signals"})
-            notes.append(f"Public announcements found: +{ann_pts:.0f}pts")
-            total += ann_pts
-
-        # 4. M&A (0–4)
-        ma_markers = ["acquisition","acquired","merger","merges","acquires","divest"]
-        ma_pts = min(4, sum(2 for m in ma_markers if m in text_l))
-        if ma_pts:
-            rules.append({"rule": "ma_activity", "points": ma_pts,
-                          "evidence": "M&A activity detected"})
-            notes.append(f"M&A activity (creates integration complexity): +{ma_pts:.0f}pts")
-            total += ma_pts
+                pain_pts += w
+                hit_kws.append(kw)
+        pain_pts = min(20, pain_pts)
+        if pain_pts:
+            rules.append({"rule":"db_pain_keywords","points":pain_pts,
+                          "evidence":f"DB pain: {hit_kws[:4]}"})
+            notes.append(f"Oracle/DB pain signals ({', '.join(hit_kws[:3])}): +{pain_pts:.0f}pts")
+            total += pain_pts
 
         capped = min(20.0, total)
         return ScoreBreakdown(raw=total, capped=capped, max_possible=20, rules_fired=rules)
 
-    # ── Meeting Propensity ───────────────────────────────────────────
+    # ── TIER 1: DBA/Platform hiring (0-15) ───────────────────────────
 
-    def _meeting_propensity(
-        self, total_score: float, timing: ScoreBreakdown, signals: List[Dict]
-    ) -> float:
+    def _score_hiring(self, text: str, signals: List[Dict], notes: List[str]) -> ScoreBreakdown:
+        rules = []
+        total = 0.0
+        text_l = text.lower()
+
+        # Score from job signals
+        hire_sigs = [s for s in signals if s.get("signal_category") == "hiring"]
+        hire_pts  = 0.0
+        hire_kws  = []
+        for sig in hire_sigs:
+            title = f"{sig.get('raw_title','')} {sig.get('raw_excerpt','')}".lower()
+            for kw, w in DB_HIRING_KEYWORDS.items():
+                if kw in title:
+                    hire_pts += w
+                    if kw not in hire_kws:
+                        hire_kws.append(kw)
+                    break
+        # Also scan signal text directly
+        for kw, w in DB_HIRING_KEYWORDS.items():
+            if kw in text_l and kw not in hire_kws:
+                hire_pts += w * 0.6   # lower confidence — from news, not job posting
+                hire_kws.append(kw)
+
+        hire_pts = min(15, hire_pts)
+        if hire_pts:
+            rules.append({"rule":"db_sre_hiring","points":hire_pts,
+                          "evidence":f"{len(hire_sigs)} hiring signals: {hire_kws[:3]}"})
+            notes.append(f"DBA/SRE hiring ({', '.join(hire_kws[:3])}): +{hire_pts:.0f}pts")
+            total += hire_pts
+
+        capped = min(15.0, total)
+        return ScoreBreakdown(raw=total, capped=capped, max_possible=15, rules_fired=rules)
+
+    # ── TIER 1: Backup/DR/automation (0-10) ──────────────────────────
+
+    def _score_operational(self, text: str, notes: List[str]) -> ScoreBreakdown:
+        rules = []
+        total = 0.0
+        text_l = text.lower()
+
+        op_pts = 0.0
+        op_kws = []
+        for kw, w in OPERATIONAL_KEYWORDS.items():
+            if kw in text_l:
+                op_pts += w
+                op_kws.append(kw)
+        op_pts = min(10, op_pts)
+        if op_pts:
+            rules.append({"rule":"operational_signals","points":op_pts,
+                          "evidence":f"Ops signals: {op_kws[:3]}"})
+            notes.append(f"Backup/DR/automation signals ({', '.join(op_kws[:3])}): +{op_pts:.0f}pts")
+            total += op_pts
+
+        capped = min(10.0, total)
+        return ScoreBreakdown(raw=total, capped=capped, max_possible=10, rules_fired=rules)
+
+    # ── TIER 1: Cloud/modernization (0-10) ───────────────────────────
+
+    def _score_modernization(self, text: str, notes: List[str]) -> ScoreBreakdown:
+        rules = []
+        total = 0.0
+        text_l = text.lower()
+
+        mod_pts = 0.0
+        mod_kws = []
+        for kw, w in MODERNIZATION_KEYWORDS.items():
+            if kw in text_l:
+                mod_pts += w
+                mod_kws.append(kw)
+        mod_pts = min(10, mod_pts)
+        if mod_pts:
+            rules.append({"rule":"modernization","points":mod_pts,
+                          "evidence":f"Modernization: {mod_kws[:3]}"})
+            notes.append(f"Cloud/modernization active ({', '.join(mod_kws[:3])}): +{mod_pts:.0f}pts")
+            total += mod_pts
+
+        capped = min(10.0, total)
+        return ScoreBreakdown(raw=total, capped=capped, max_possible=10, rules_fired=rules)
+
+    # ── TIER 2: Leadership change (0-10) ─────────────────────────────
+
+    def _score_leadership(self, text: str, signals: List[Dict], notes: List[str]) -> ScoreBreakdown:
+        rules = []
+        total = 0.0
+        text_l = text.lower()
+
+        lead_pts = 0.0
+        for kw, w in LEADERSHIP_TIMING_KEYWORDS.items():
+            if kw in text_l:
+                lead_pts += w
+        lead_pts = min(10, lead_pts)
+        if lead_pts:
+            rules.append({"rule":"leadership_change","points":lead_pts,
+                          "evidence":"CIO/CTO/VP leadership change detected"})
+            notes.append(f"Leadership change (new CIO/CTO/VP Infra): +{lead_pts:.0f}pts")
+            total += lead_pts
+
+        capped = min(10.0, total)
+        return ScoreBreakdown(raw=total, capped=capped, max_possible=10, rules_fired=rules)
+
+    # ── TIER 2: M&A complexity (0-8) ─────────────────────────────────
+
+    def _score_ma(self, text: str, notes: List[str]) -> ScoreBreakdown:
+        rules = []
+        total = 0.0
+        text_l = text.lower()
+
+        ma_pts = 0.0
+        ma_kws = []
+        for kw, w in MA_KEYWORDS.items():
+            if kw in text_l:
+                ma_pts += w
+                ma_kws.append(kw)
+        ma_pts = min(8, ma_pts)
+        if ma_pts:
+            rules.append({"rule":"ma_complexity","points":ma_pts,
+                          "evidence":f"M&A signals: {ma_kws[:3]}"})
+            notes.append(f"M&A/acquisition complexity (DB sprawl risk): +{ma_pts:.0f}pts")
+            total += ma_pts
+
+        capped = min(8.0, total)
+        return ScoreBreakdown(raw=total, capped=capped, max_possible=8, rules_fired=rules)
+
+    # ── TIER 2: Expansion + compliance (0-7) ─────────────────────────
+
+    def _score_urgency_context(self, text: str, notes: List[str]) -> ScoreBreakdown:
+        rules = []
+        total = 0.0
+        text_l = text.lower()
+
+        # Expansion (0-4)
+        exp_pts = min(4, sum(w for kw,w in EXPANSION_KEYWORDS.items() if kw in text_l))
+        if exp_pts:
+            rules.append({"rule":"expansion","points":exp_pts,"evidence":"Multi-region/expansion signals"})
+            notes.append(f"Rapid expansion/multi-region: +{exp_pts:.0f}pts")
+            total += exp_pts
+
+        # Compliance (0-3)
+        comp_pts = min(3, sum(w for kw,w in COMPLIANCE_KEYWORDS.items() if kw in text_l))
+        if comp_pts:
+            rules.append({"rule":"compliance","points":comp_pts,"evidence":"Security/compliance pressure"})
+            notes.append(f"Security/compliance pressure: +{comp_pts:.0f}pts")
+            total += comp_pts
+
+        capped = min(7.0, total)
+        return ScoreBreakdown(raw=total, capped=capped, max_possible=7, rules_fired=rules)
+
+    # ── TIER 3: Enterprise context (0-20) ────────────────────────────
+
+    def _score_context(self, text: str, gate: EnterpriseGateResult,
+                       industry: Optional[str], notes: List[str]) -> ScoreBreakdown:
+        rules = []
+        total = 0.0
+        text_l = text.lower()
+
+        # Enterprise tier (0-8, was 0-15)
+        tier_pts = {
+            "fortune_500": 8, "fortune_1000": 7,
+            "large_enterprise": 5, "large_private": 4,
+            "upper_midmarket": 2, "excluded": 0,
+        }.get(gate.tier, 0)
+        if tier_pts:
+            rules.append({"rule":"enterprise_tier","points":tier_pts,
+                          "evidence":f"Tier: {gate.tier}"})
+            notes.append(f"Enterprise tier ({gate.tier}): +{tier_pts}pts")
+            total += tier_pts
+
+        # Industry fit (0-7)
+        ind_pts = 0.0
+        if industry:
+            ind_l = industry.lower()
+            if any(r in ind_l for r in HIGH_FIT_INDUSTRIES):
+                ind_pts = 7
+            elif any(r in ind_l for r in MED_FIT_INDUSTRIES):
+                ind_pts = 4
+        if ind_pts:
+            rules.append({"rule":"industry_fit","points":ind_pts,"evidence":f"Industry: {industry}"})
+            notes.append(f"Industry fit ({industry}): +{ind_pts:.0f}pts")
+            total += ind_pts
+
+        # Mission critical (0-5)
+        mc_markers = ["mission critical","24/7","zero downtime","high availability",
+                      "uptime sla","production systems","always-on","tier 1 application"]
+        mc_pts = min(5, sum(1.67 for m in mc_markers if m in text_l))
+        if mc_pts:
+            rules.append({"rule":"mission_critical","points":mc_pts,"evidence":"Mission-critical env"})
+            notes.append(f"Mission-critical environment: +{mc_pts:.0f}pts")
+            total += mc_pts
+
+        capped = min(20.0, total)
+        return ScoreBreakdown(raw=total, capped=capped, max_possible=20, rules_fired=rules)
+
+    # ── PENALTY SYSTEM ────────────────────────────────────────────────
+
+    def _score_penalties(self, text: str, signals: List[Dict],
+                         notes: List[str]) -> float:
+        """Returns negative adjustment (0 or negative)."""
+        penalty = 0.0
+        text_l  = text.lower()
+
+        # Penalty: DB vendor/seller
+        for sig in DB_VENDOR_SIGNALS:
+            if sig in text_l:
+                penalty -= 15
+                notes.append(f"Penalty: DB vendor/seller signal detected: -15pts")
+                break
+
+        # Penalty: only stale signals (all >90 days old)
+        if signals:
+            cutoff = datetime.utcnow() - timedelta(days=STALE_SIGNAL_DAYS)
+            fresh_count = 0
+            for sig in signals:
+                date_str = sig.get("signal_date","")
+                if not date_str:
+                    fresh_count += 0.5
+                    continue
+                try:
+                    sig_date = datetime.fromisoformat(str(date_str).replace("Z","+00:00"))
+                    if sig_date.replace(tzinfo=None) >= cutoff:
+                        fresh_count += 1
+                except Exception:
+                    fresh_count += 0.3
+            if fresh_count == 0 and len(signals) > 0:
+                penalty -= 10
+                notes.append("Penalty: all signals are stale (>90 days): -10pts")
+            elif fresh_count < len(signals) * 0.3:
+                penalty -= 5
+                notes.append("Penalty: mostly stale signals: -5pts")
+
+        # Penalty: Fortune rank is the ONLY positive signal
+        if signals and all(
+            not any(kw in (sig.get("raw_excerpt","") or "").lower()
+                    for kw in ["oracle","database","dba","migration","cloud","backup","sre"])
+            for sig in signals
+        ):
+            penalty -= 5
+            notes.append("Penalty: no Tessell-relevant signals in content: -5pts")
+
+        return max(-25, penalty)  # cap penalty at -25
+
+    # ── RECENT HIRING BOOST ───────────────────────────────────────────
+
+    def _recent_hiring_boost(self, signals: List[Dict], notes: List[str]) -> float:
+        """Extra boost for very recent (<30d) DB/SRE hiring."""
+        cutoff = datetime.utcnow() - timedelta(days=30)
+        recent = 0
+        for sig in signals:
+            if sig.get("signal_category") != "hiring":
+                continue
+            date_str = sig.get("signal_date","")
+            if not date_str:
+                recent += 0.5; continue
+            try:
+                sig_date = datetime.fromisoformat(str(date_str).replace("Z","+00:00"))
+                if sig_date.replace(tzinfo=None) >= cutoff:
+                    recent += 1
+            except Exception:
+                recent += 0.3
+        boost = min(6, recent * 2)
+        if boost:
+            notes.append(f"Recent DB/SRE hiring (<30d, {recent:.0f} roles): +{boost:.0f}pts")
+        return boost
+
+
+    def _meeting_propensity(self, total: float, tier1: float,
+                             tier2: float, signals: List[Dict]) -> float:
         """
-        0–100 score answering: "How likely is a meeting to be booked THIS WEEK?"
-        Components:
-          - Total score weight (35%)
-          - Timing score weight (25%)
-          - Recent hiring signals (20%)
-          - Leadership change detected (15%)
-          - Announcement detected (5%)
+        0-100: How likely is a meeting THIS WEEK?
+        Primary driver: Tessell buying signals (tier1) + urgency (tier2)
         """
-        score_component = (total_score / 100) * 35
-        timing_component = (timing.capped / 20) * 25
-
-        recent_hires = sum(1 for r in timing.rules_fired if r["rule"] == "recent_hiring")
-        hiring_component = min(20, recent_hires * 10)
-
-        leadership = any(r["rule"] == "timing_keywords" for r in timing.rules_fired)
-        leadership_component = 15 if leadership else 0
-
-        announcement = any(r["rule"] == "announcements" for r in timing.rules_fired)
-        announcement_component = 5 if announcement else 0
-
-        raw = score_component + timing_component + hiring_component + leadership_component + announcement_component
+        signal_component  = (tier1 / 55) * 45    # 45% weight on buying signals
+        urgency_component = (tier2 / 25) * 30    # 30% weight on urgency
+        size_component    = (total / 100) * 15   # 15% overall score
+        recency = sum(1 for s in signals if s.get("signal_category") in ("hiring","timing"))
+        recency_component = min(10, recency * 2) # 10% recency
+        raw = signal_component + urgency_component + size_component + recency_component
         return round(min(100.0, raw), 1)
-
-    # ── Helpers ──────────────────────────────────────────────────────
 
     def _signals_to_text(self, signals: List[Dict]) -> str:
         parts = []
@@ -935,7 +1114,7 @@ class TessellScorer:
         elif len(signals) >= 5: score += 0.2
         elif len(signals) >= 2: score += 0.1
         if gate.estimated_employees: score += 0.25
-        if gate.confidence >= 0.8: score += 0.2
+        if gate.confidence >= 0.8:   score += 0.2
         strong = sum(1 for s in signals if s.get("confidence", 0) >= 0.8)
         score += min(0.25, strong * 0.05)
         return round(min(1.0, score), 2)
