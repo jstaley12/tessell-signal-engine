@@ -805,23 +805,20 @@ class TessellScorer:
         all_text = self._signals_to_text(signals)
         notes    = []
 
-        # ── TIER 1: Immediate buying signals ────────────────────────
-        t1_pain  = self._score_db_pain(company_name, all_text, signals, industry, notes)
-        t1_hire  = self._score_hiring(all_text, signals, notes)
-        t1_ops   = self._score_operational(all_text, notes)
-        t1_mod   = self._score_modernization(all_text, notes)
-        tier1    = t1_pain.capped + t1_hire.capped + t1_ops.capped + t1_mod.capped
+        # ── TIER-BASED SIGNAL SCORING ────────────────────────────────
+        # Each signal is pre-classified into tier 1/2/3 by signal.py
+        # 1 Tier 1 signal (15pts) > 15 Tier 3 signals (1pt each)
+        # No company ranks top 10 from Tier 3 alone (max Tier 3 = 5pts)
+        tier_scores = self._score_by_tier(signals, notes)
+        tier1_pts   = tier_scores["tier1"]
+        tier2_pts   = tier_scores["tier2"]
+        tier3_pts   = tier_scores["tier3"]
+        signal_total = tier1_pts + tier2_pts + tier3_pts  # max 70
 
-        # ── TIER 2: Urgency multipliers ──────────────────────────────
-        t2_lead  = self._score_leadership(all_text, signals, notes)
-        t2_ma    = self._score_ma(all_text, notes)
-        t2_urg   = self._score_urgency_context(all_text, notes)
-        recent_boost = self._recent_hiring_boost(signals, notes)
-        tier2    = t2_lead.capped + t2_ma.capped + t2_urg.capped + recent_boost
-
-        # ── TIER 3: Context / qualification ─────────────────────────
-        t3_ctx   = self._score_context(all_text, enterprise_gate_result, industry, notes)
-        tier3    = t3_ctx.capped
+        # ── INDUSTRY BASELINE (inferred DB complexity, no signals needed) ──
+        # Airlines/hospitals/banks score even with 0 signals
+        # This is additive to signal score, not a replacement
+        ind_base = self._score_industry_baseline(industry, notes)  # max 20
 
         # ── TERRITORY (0-15) ─────────────────────────────────────────
         territory, terr_notes = score_territory(
@@ -833,11 +830,21 @@ class TessellScorer:
         )
         notes.extend(terr_notes)
 
+        # ── ENTERPRISE CONTEXT BOOST (0-10) ──────────────────────────
+        # Small boost for Fortune tier — size matters but is not primary
+        tier_boost = {
+            "fortune_500": 10, "fortune_1000": 8,
+            "large_enterprise": 6, "large_private": 4,
+            "upper_midmarket": 2, "excluded": 0,
+        }.get(enterprise_gate_result.tier, 0)
+        if tier_boost:
+            notes.append(f"Enterprise tier ({enterprise_gate_result.tier}): +{tier_boost}pts")
+
         # ── PENALTIES ────────────────────────────────────────────────
-        penalty  = self._score_penalties(all_text, signals, notes)
+        penalty = self._score_penalties(signals, notes)
 
         # ── TOTAL ────────────────────────────────────────────────────
-        raw_total = tier1 + tier2 + tier3 + territory.capped + penalty
+        raw_total = signal_total + ind_base + territory.capped + tier_boost + penalty
         total     = max(0.0, min(100.0, raw_total))
 
         # ── HEAT LEVEL ───────────────────────────────────────────────
@@ -848,33 +855,40 @@ class TessellScorer:
                 break
 
         # ── MEETING PROPENSITY ───────────────────────────────────────
-        mp = self._meeting_propensity(total, tier1, tier2, signals)
+        mp = self._meeting_propensity(total, tier1_pts, tier2_pts, signals)
 
         # ── SURFACE DECISION ─────────────────────────────────────────
-        surfaced       = total >= MIN_SURFACE_SCORE
+        # Require at least 1 Tier 1 OR 2 Tier 2 signals to surface
+        # (prevents Tier 3-only companies from appearing in results)
+        has_min_signal = tier1_pts >= 15 or tier2_pts >= 10 or ind_base >= 12
+        surfaced = total >= MIN_SURFACE_SCORE and has_min_signal
         surface_reason = (
-            f"Score {total:.0f} ≥ threshold {MIN_SURFACE_SCORE}" if surfaced
-            else f"Score {total:.0f} < threshold {MIN_SURFACE_SCORE}"
+            f"Score {total:.0f}, {tier_scores['t1_count']} T1 signals, {tier_scores['t2_count']} T2"
+            if surfaced else
+            f"Score {total:.0f} — needs T1 signal or strong industry baseline"
         )
 
-        # Build legacy-compatible score breakdowns for UI
-        # Map new tiers to old Fit/Pain/Timing/Territory structure
+        # Legacy-compatible breakdowns for UI
         fit = ScoreBreakdown(
-            raw=tier3, capped=min(40, tier3 + t1_pain.capped * 0.3),
+            raw=ind_base + tier_boost,
+            capped=min(40, ind_base + tier_boost),
             max_possible=40,
-            rules_fired=t3_ctx.rules_fired,
+            rules_fired=[{"rule":"industry_baseline","points":ind_base,"evidence":f"Industry: {industry}"},
+                         {"rule":"enterprise_tier","points":tier_boost,"evidence":enterprise_gate_result.tier}],
         )
         pain = ScoreBreakdown(
-            raw=tier1, capped=min(40, tier1),
+            raw=signal_total, capped=min(40, signal_total),
             max_possible=40,
-            rules_fired=t1_pain.rules_fired + t1_hire.rules_fired + t1_ops.rules_fired + t1_mod.rules_fired,
+            rules_fired=[{"rule":"tier1_signals","points":tier1_pts,"evidence":f"{tier_scores['t1_count']} Tier 1"},
+                         {"rule":"tier2_signals","points":tier2_pts,"evidence":f"{tier_scores['t2_count']} Tier 2"},
+                         {"rule":"tier3_signals","points":tier3_pts,"evidence":f"{tier_scores['t3_count']} Tier 3"}],
         )
         timing = ScoreBreakdown(
-            raw=tier2, capped=min(20, tier2),
+            raw=tier1_pts, capped=min(20, tier1_pts),
             max_possible=20,
-            rules_fired=t2_lead.rules_fired + t2_ma.rules_fired + t2_urg.rules_fired,
+            rules_fired=[{"rule":"tier1_buying_signals","points":tier1_pts,
+                          "evidence":f"{tier_scores['t1_count']} immediate buyer motion signals"}],
         )
-
         confidence = self._confidence(signals, enterprise_gate_result)
 
         return FullScoreResult(
@@ -888,366 +902,131 @@ class TessellScorer:
             score_notes=notes,
         )
 
+    # ── TIER-BASED SIGNAL SCORING ─────────────────────────────────────
 
-    # ── TIER 1: Oracle/DB pain (0-20) ────────────────────────────────
-
-    def _score_db_pain(self, company_name: str, text: str,
-                       signals: List[Dict], industry: Optional[str],
-                       notes: List[str]) -> ScoreBreakdown:
+    def _score_by_tier(self, signals: List[Dict], notes: List[str]) -> dict:
         """
-        Source-aware DB pain scoring.
-        - SEC signals: capped at +2 regardless of keyword matches
-        - Job/news signals: full keyword scoring
-        - Company name stripped from text before scoring (avoids Oracle Corp self-match)
-        - Inferred industry baseline: airlines/healthcare/etc get baseline without signals
+        Score signals by their tier classification.
+        Tier 1: 15 pts each, max 45
+        Tier 2:  5 pts each, max 20
+        Tier 3:  1 pt  each, max  5
         """
-        rules = []
-        total = 0.0
+        from collectors.signal import (
+            classify_signal_tier, SIGNAL_TIER_WEIGHTS, SIGNAL_TIER_MAX_PTS
+        )
 
-        # ── A. Inferred industry baseline (no signals needed) ─────────
-        ind_base = 0
-        if industry:
-            ind_l = industry.lower()
-            for ind_key, pts in INDUSTRY_DB_COMPLEXITY.items():
-                if ind_key in ind_l:
-                    ind_base = pts
-                    break
-        if ind_base > 0:
-            rules.append({"rule":"industry_db_complexity","points":ind_base,
-                          "evidence":f"Industry '{industry}' → known DB complexity baseline"})
-            notes.append(f"Inferred DB complexity ({industry}): +{ind_base}pts baseline")
-            total += ind_base
+        t1_pts = t2_pts = t3_pts = 0.0
+        t1_count = t2_count = t3_count = 0
+        t1_reasons = []
+        t2_reasons = []
 
-        # ── B. Signal-based scoring — source-aware ────────────────────
-        # Strip company name tokens from text to prevent self-match
-        # e.g. "Oracle Corp" should not score 'oracle' keyword
-        name_lower  = company_name.lower()
-        # Build a decontaminated text: only use text from non-SEC signals
-        live_text_parts = []
-        sec_text_parts  = []
         for sig in signals:
-            src   = sig.get("source_type","")
-            exc   = sig.get("raw_excerpt","") or ""
-            title = sig.get("raw_title","")   or ""
-            kws   = sig.get("keywords_matched",[]) or []
-            chunk = f"{title} {exc} {' '.join(kws)}"
-            if src == "sec_edgar":
-                sec_text_parts.append(chunk)
+            src      = sig.get("source_type","")
+            sig_type = sig.get("signal_category", sig.get("signal_type",""))
+            snippet  = sig.get("raw_excerpt","") or sig.get("raw_title","") or ""
+            date     = sig.get("signal_date","") or sig.get("date_found","") or ""
+            kws      = sig.get("keywords_matched",[]) or []
+
+            # Use pre-classified tier if available (set by signal.py __post_init__)
+            tier      = sig.get("signal_tier", 0)
+            label     = sig.get("tier_label","")
+            reason    = sig.get("human_reason","")
+
+            # Re-classify if not pre-classified
+            if not tier or not label:
+                tier, label, reason = classify_signal_tier(src, sig_type, snippet, date, kws)
+
+            if tier == 1:
+                t1_pts   += SIGNAL_TIER_WEIGHTS[1]
+                t1_count += 1
+                if reason and reason not in t1_reasons:
+                    t1_reasons.append(reason)
+            elif tier == 2:
+                t2_pts   += SIGNAL_TIER_WEIGHTS[2]
+                t2_count += 1
+                if reason and reason not in t2_reasons:
+                    t2_reasons.append(reason)
             else:
-                live_text_parts.append(chunk)
+                t3_pts   += SIGNAL_TIER_WEIGHTS[3]
+                t3_count += 1
 
-        # Score live signals at full weight, strip company name
-        live_text = " ".join(live_text_parts).lower()
-        # Remove exact company name tokens (prevents Oracle Corp scoring 'oracle')
-        for token in name_lower.split():
-            if len(token) > 3:
-                live_text = live_text.replace(token, "___")
+        # Apply per-tier caps
+        t1_pts = min(SIGNAL_TIER_MAX_PTS[1], t1_pts)
+        t2_pts = min(SIGNAL_TIER_MAX_PTS[2], t2_pts)
+        t3_pts = min(SIGNAL_TIER_MAX_PTS[3], t3_pts)
 
-        live_pts = 0.0
-        hit_kws  = []
-        for kw, w in DB_PAIN_KEYWORDS.items():
-            if kw in live_text:
-                live_pts += w
-                hit_kws.append(kw)
-        live_pts = min(20, live_pts)
-        if live_pts:
-            rules.append({"rule":"live_signal_db_pain","points":live_pts,
-                          "evidence":f"Live signals — DB pain: {hit_kws[:3]}"})
-            notes.append(f"Live DB pain signals ({', '.join(hit_kws[:3])}): +{live_pts:.0f}pts")
-            total += live_pts
+        if t1_pts:
+            for r in t1_reasons[:3]:
+                notes.append(f"⚡ T1: {r}")
+        if t2_pts:
+            for r in t2_reasons[:2]:
+                notes.append(f"▲ T2: {r}")
+        if t3_pts:
+            notes.append(f"▽ T3: {t3_count} minor context signals (+{t3_pts:.0f}pts)")
 
-        # Score SEC signals — CAPPED AT +2 TOTAL regardless of content
-        if sec_text_parts:
-            sec_text  = " ".join(sec_text_parts).lower()
-            sec_hit   = any(kw in sec_text for kw in ["oracle","sql server","database","db2","postgresql"])
-            sec_pts   = 2.0 if sec_hit else 0.0
-            if sec_pts:
-                rules.append({"rule":"sec_filing_mention","points":sec_pts,
-                              "evidence":"SEC filing mentions DB technology (capped at +2)"})
-                notes.append(f"SEC filing DB mention: +{sec_pts:.0f}pts (capped)")
-                total += sec_pts
+        return {
+            "tier1": t1_pts, "tier2": t2_pts, "tier3": t3_pts,
+            "t1_count": t1_count, "t2_count": t2_count, "t3_count": t3_count,
+            "t1_reasons": t1_reasons, "t2_reasons": t2_reasons,
+        }
 
-        capped = min(20.0, total)
-        return ScoreBreakdown(raw=total, capped=capped, max_possible=20, rules_fired=rules)
+    # ── INDUSTRY BASELINE ─────────────────────────────────────────────
 
-    # ── TIER 1: DBA/Platform hiring (0-15) ───────────────────────────
+    def _score_industry_baseline(self, industry: Optional[str],
+                                  notes: List[str]) -> float:
+        """
+        Assigns baseline DB complexity score by industry.
+        No signals required — these industries are known Oracle/legacy DB users.
+        Caps at 20 — ensures live Tier 1 signals always outrank baseline alone.
+        """
+        if not industry:
+            return 0
+        ind_l = industry.lower()
+        pts = 0
+        for ind_key, base_pts in INDUSTRY_DB_COMPLEXITY.items():
+            if ind_key in ind_l:
+                pts = base_pts
+                break
+        if pts > 0:
+            notes.append(f"Industry DB baseline ({industry}): +{pts}pts (inferred)")
+        return min(20.0, float(pts))
 
-    def _score_hiring(self, text: str, signals: List[Dict], notes: List[str]) -> ScoreBreakdown:
-        rules = []
-        total = 0.0
-        text_l = text.lower()
+    # ── PENALTIES ─────────────────────────────────────────────────────
 
-        # Score from job signals
-        hire_sigs = [s for s in signals if s.get("signal_category") == "hiring"]
-        hire_pts  = 0.0
-        hire_kws  = []
-        for sig in hire_sigs:
-            title = f"{sig.get('raw_title','')} {sig.get('raw_excerpt','')}".lower()
-            for kw, w in DB_HIRING_KEYWORDS.items():
-                if kw in title:
-                    hire_pts += w
-                    if kw not in hire_kws:
-                        hire_kws.append(kw)
-                    break
-        # Also scan signal text directly
-        for kw, w in DB_HIRING_KEYWORDS.items():
-            if kw in text_l and kw not in hire_kws:
-                hire_pts += w * 0.6   # lower confidence — from news, not job posting
-                hire_kws.append(kw)
-
-        hire_pts = min(15, hire_pts)
-        if hire_pts:
-            rules.append({"rule":"db_sre_hiring","points":hire_pts,
-                          "evidence":f"{len(hire_sigs)} hiring signals: {hire_kws[:3]}"})
-            notes.append(f"DBA/SRE hiring ({', '.join(hire_kws[:3])}): +{hire_pts:.0f}pts")
-            total += hire_pts
-
-        capped = min(15.0, total)
-        return ScoreBreakdown(raw=total, capped=capped, max_possible=15, rules_fired=rules)
-
-    # ── TIER 1: Backup/DR/automation (0-10) ──────────────────────────
-
-    def _score_operational(self, text: str, notes: List[str]) -> ScoreBreakdown:
-        rules = []
-        total = 0.0
-        text_l = text.lower()
-
-        op_pts = 0.0
-        op_kws = []
-        for kw, w in OPERATIONAL_KEYWORDS.items():
-            if kw in text_l:
-                op_pts += w
-                op_kws.append(kw)
-        op_pts = min(10, op_pts)
-        if op_pts:
-            rules.append({"rule":"operational_signals","points":op_pts,
-                          "evidence":f"Ops signals: {op_kws[:3]}"})
-            notes.append(f"Backup/DR/automation signals ({', '.join(op_kws[:3])}): +{op_pts:.0f}pts")
-            total += op_pts
-
-        capped = min(10.0, total)
-        return ScoreBreakdown(raw=total, capped=capped, max_possible=10, rules_fired=rules)
-
-    # ── TIER 1: Cloud/modernization (0-10) ───────────────────────────
-
-    def _score_modernization(self, text: str, notes: List[str]) -> ScoreBreakdown:
-        rules = []
-        total = 0.0
-        text_l = text.lower()
-
-        mod_pts = 0.0
-        mod_kws = []
-        for kw, w in MODERNIZATION_KEYWORDS.items():
-            if kw in text_l:
-                mod_pts += w
-                mod_kws.append(kw)
-        mod_pts = min(10, mod_pts)
-        if mod_pts:
-            rules.append({"rule":"modernization","points":mod_pts,
-                          "evidence":f"Modernization: {mod_kws[:3]}"})
-            notes.append(f"Cloud/modernization active ({', '.join(mod_kws[:3])}): +{mod_pts:.0f}pts")
-            total += mod_pts
-
-        capped = min(10.0, total)
-        return ScoreBreakdown(raw=total, capped=capped, max_possible=10, rules_fired=rules)
-
-    # ── TIER 2: Leadership change (0-10) ─────────────────────────────
-
-    def _score_leadership(self, text: str, signals: List[Dict], notes: List[str]) -> ScoreBreakdown:
-        rules = []
-        total = 0.0
-        text_l = text.lower()
-
-        lead_pts = 0.0
-        for kw, w in LEADERSHIP_TIMING_KEYWORDS.items():
-            if kw in text_l:
-                lead_pts += w
-        lead_pts = min(10, lead_pts)
-        if lead_pts:
-            rules.append({"rule":"leadership_change","points":lead_pts,
-                          "evidence":"CIO/CTO/VP leadership change detected"})
-            notes.append(f"Leadership change (new CIO/CTO/VP Infra): +{lead_pts:.0f}pts")
-            total += lead_pts
-
-        capped = min(10.0, total)
-        return ScoreBreakdown(raw=total, capped=capped, max_possible=10, rules_fired=rules)
-
-    # ── TIER 2: M&A complexity (0-8) ─────────────────────────────────
-
-    def _score_ma(self, text: str, notes: List[str]) -> ScoreBreakdown:
-        rules = []
-        total = 0.0
-        text_l = text.lower()
-
-        ma_pts = 0.0
-        ma_kws = []
-        for kw, w in MA_KEYWORDS.items():
-            if kw in text_l:
-                ma_pts += w
-                ma_kws.append(kw)
-        ma_pts = min(8, ma_pts)
-        if ma_pts:
-            rules.append({"rule":"ma_complexity","points":ma_pts,
-                          "evidence":f"M&A signals: {ma_kws[:3]}"})
-            notes.append(f"M&A/acquisition complexity (DB sprawl risk): +{ma_pts:.0f}pts")
-            total += ma_pts
-
-        capped = min(8.0, total)
-        return ScoreBreakdown(raw=total, capped=capped, max_possible=8, rules_fired=rules)
-
-    # ── TIER 2: Expansion + compliance (0-7) ─────────────────────────
-
-    def _score_urgency_context(self, text: str, notes: List[str]) -> ScoreBreakdown:
-        rules = []
-        total = 0.0
-        text_l = text.lower()
-
-        # Expansion (0-4)
-        exp_pts = min(4, sum(w for kw,w in EXPANSION_KEYWORDS.items() if kw in text_l))
-        if exp_pts:
-            rules.append({"rule":"expansion","points":exp_pts,"evidence":"Multi-region/expansion signals"})
-            notes.append(f"Rapid expansion/multi-region: +{exp_pts:.0f}pts")
-            total += exp_pts
-
-        # Compliance (0-3)
-        comp_pts = min(3, sum(w for kw,w in COMPLIANCE_KEYWORDS.items() if kw in text_l))
-        if comp_pts:
-            rules.append({"rule":"compliance","points":comp_pts,"evidence":"Security/compliance pressure"})
-            notes.append(f"Security/compliance pressure: +{comp_pts:.0f}pts")
-            total += comp_pts
-
-        capped = min(7.0, total)
-        return ScoreBreakdown(raw=total, capped=capped, max_possible=7, rules_fired=rules)
-
-    # ── TIER 3: Enterprise context (0-20) ────────────────────────────
-
-    def _score_context(self, text: str, gate: EnterpriseGateResult,
-                       industry: Optional[str], notes: List[str]) -> ScoreBreakdown:
-        rules = []
-        total = 0.0
-        text_l = text.lower()
-
-        # Enterprise tier (0-8, was 0-15)
-        tier_pts = {
-            "fortune_500": 8, "fortune_1000": 7,
-            "large_enterprise": 5, "large_private": 4,
-            "upper_midmarket": 2, "excluded": 0,
-        }.get(gate.tier, 0)
-        if tier_pts:
-            rules.append({"rule":"enterprise_tier","points":tier_pts,
-                          "evidence":f"Tier: {gate.tier}"})
-            notes.append(f"Enterprise tier ({gate.tier}): +{tier_pts}pts")
-            total += tier_pts
-
-        # Industry fit (0-7)
-        ind_pts = 0.0
-        if industry:
-            ind_l = industry.lower()
-            if any(r in ind_l for r in HIGH_FIT_INDUSTRIES):
-                ind_pts = 7
-            elif any(r in ind_l for r in MED_FIT_INDUSTRIES):
-                ind_pts = 4
-        if ind_pts:
-            rules.append({"rule":"industry_fit","points":ind_pts,"evidence":f"Industry: {industry}"})
-            notes.append(f"Industry fit ({industry}): +{ind_pts:.0f}pts")
-            total += ind_pts
-
-        # Mission critical (0-5)
-        mc_markers = ["mission critical","24/7","zero downtime","high availability",
-                      "uptime sla","production systems","always-on","tier 1 application"]
-        mc_pts = min(5, sum(1.67 for m in mc_markers if m in text_l))
-        if mc_pts:
-            rules.append({"rule":"mission_critical","points":mc_pts,"evidence":"Mission-critical env"})
-            notes.append(f"Mission-critical environment: +{mc_pts:.0f}pts")
-            total += mc_pts
-
-        capped = min(20.0, total)
-        return ScoreBreakdown(raw=total, capped=capped, max_possible=20, rules_fired=rules)
-
-    # ── PENALTY SYSTEM ────────────────────────────────────────────────
-
-    def _score_penalties(self, text: str, signals: List[Dict],
-                         notes: List[str]) -> float:
-        """Returns negative adjustment (0 or negative)."""
+    def _score_penalties(self, signals: List[Dict], notes: List[str]) -> float:
         penalty = 0.0
-        text_l  = text.lower()
+        text_l  = self._signals_to_text(signals).lower()
 
-        # Penalty: DB vendor/seller
-        for sig in DB_VENDOR_SIGNALS:
-            if sig in text_l:
+        # Penalty: DB vendor/seller signals
+        for sig_kw in DB_VENDOR_SIGNALS:
+            if sig_kw in text_l:
                 penalty -= 15
-                notes.append(f"Penalty: DB vendor/seller signal detected: -15pts")
+                notes.append("Penalty: DB vendor signal detected: -15pts")
                 break
 
-        # Penalty: only stale signals (all >90 days old)
+        # Penalty: all signals stale (>90 days)
+        from collectors.signal import _days_ago
         if signals:
-            cutoff = datetime.utcnow() - timedelta(days=STALE_SIGNAL_DAYS)
-            fresh_count = 0
-            for sig in signals:
-                date_str = sig.get("signal_date","")
-                if not date_str:
-                    fresh_count += 0.5
-                    continue
-                try:
-                    sig_date = datetime.fromisoformat(str(date_str).replace("Z","+00:00"))
-                    if sig_date.replace(tzinfo=None) >= cutoff:
-                        fresh_count += 1
-                except Exception:
-                    fresh_count += 0.3
-            if fresh_count == 0 and len(signals) > 0:
+            fresh = sum(1 for s in signals
+                       if _days_ago(s.get("signal_date","") or s.get("date_found","")) < 90)
+            if fresh == 0:
                 penalty -= 10
-                notes.append("Penalty: all signals are stale (>90 days): -10pts")
-            elif fresh_count < len(signals) * 0.3:
-                penalty -= 5
-                notes.append("Penalty: mostly stale signals: -5pts")
+                notes.append("Penalty: all signals stale (>90d): -10pts")
 
-        # Penalty: Fortune rank is the ONLY positive signal
-        if signals and all(
-            not any(kw in (sig.get("raw_excerpt","") or "").lower()
-                    for kw in ["oracle","database","dba","migration","cloud","backup","sre"])
-            for sig in signals
-        ):
-            penalty -= 5
-            notes.append("Penalty: no Tessell-relevant signals in content: -5pts")
+        return max(-25, penalty)
 
-        return max(-25, penalty)  # cap penalty at -25
+    # ── MEETING PROPENSITY ────────────────────────────────────────────
 
-    # ── RECENT HIRING BOOST ───────────────────────────────────────────
-
-    def _recent_hiring_boost(self, signals: List[Dict], notes: List[str]) -> float:
-        """Extra boost for very recent (<30d) DB/SRE hiring."""
-        cutoff = datetime.utcnow() - timedelta(days=30)
-        recent = 0
-        for sig in signals:
-            if sig.get("signal_category") != "hiring":
-                continue
-            date_str = sig.get("signal_date","")
-            if not date_str:
-                recent += 0.5; continue
-            try:
-                sig_date = datetime.fromisoformat(str(date_str).replace("Z","+00:00"))
-                if sig_date.replace(tzinfo=None) >= cutoff:
-                    recent += 1
-            except Exception:
-                recent += 0.3
-        boost = min(6, recent * 2)
-        if boost:
-            notes.append(f"Recent DB/SRE hiring (<30d, {recent:.0f} roles): +{boost:.0f}pts")
-        return boost
-
-
-    def _meeting_propensity(self, total: float, tier1: float,
-                             tier2: float, signals: List[Dict]) -> float:
+    def _meeting_propensity(self, total: float, tier1_pts: float,
+                             tier2_pts: float, signals: List[Dict]) -> float:
         """
         0-100: How likely is a meeting THIS WEEK?
-        Primary driver: Tessell buying signals (tier1) + urgency (tier2)
+        Driven primarily by Tier 1 signals.
         """
-        signal_component  = (tier1 / 55) * 45    # 45% weight on buying signals
-        urgency_component = (tier2 / 25) * 30    # 30% weight on urgency
-        size_component    = (total / 100) * 15   # 15% overall score
-        recency = sum(1 for s in signals if s.get("signal_category") in ("hiring","timing"))
-        recency_component = min(10, recency * 2) # 10% recency
-        raw = signal_component + urgency_component + size_component + recency_component
+        t1_component  = (tier1_pts / 45) * 50    # 50% weight on Tier 1
+        t2_component  = (tier2_pts / 20) * 25    # 25% weight on Tier 2
+        size_component = (total / 100) * 25       # 25% overall score
+        raw = t1_component + t2_component + size_component
         return round(min(100.0, raw), 1)
 
     def _signals_to_text(self, signals: List[Dict]) -> str:
