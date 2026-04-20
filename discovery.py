@@ -113,91 +113,103 @@ def why_discovered(discovery_source: str, signals: list) -> str:
     return "; ".join(reasons) if reasons else "discovered from live signals"
 
 
-def tessell_relevance_reason(signals: list) -> str:
-    """Which Tessell-relevant signals were found."""
+def tessell_relevance_reason(company_name: str, industry: str, signals: list) -> str:
+    """
+    Generate the 'Why Tessell Now' narrative.
+    Uses inferred industry complexity + actual signals found.
+    This is what a rep sees on the card to decide whether to call.
+    """
+    ind_lower = (industry or "").lower()
+    name_lower = company_name.lower()
+
+    # Industry-based narratives (inferred, no signals needed)
+    INDUSTRY_NARRATIVES = {
+        "airline":         "Airline ops require 24/7 Oracle uptime for reservations, loyalty, and revenue mgmt — known DB complexity",
+        "airlines":        "Airline ops require 24/7 Oracle uptime for reservations, loyalty, and revenue mgmt — known DB complexity",
+        "hospital":        "Hospital systems run Oracle/Epic EHR with strict HIPAA DR requirements — high DBA toil environment",
+        "health system":   "Health system Oracle/EHR workloads + HIPAA compliance = strong Tessell fit",
+        "healthcare":      "Healthcare Oracle footprint + DR/HA requirements — known DB complexity, strong Tessell fit",
+        "banking":         "Core banking on Oracle/SQL Server, 24/7 uptime SLA, regulatory compliance — prime Tessell territory",
+        "financial":       "Financial services Oracle dependency + audit/compliance pressure — strong DB automation need",
+        "insurance":       "Insurance policy/claims systems on Oracle — DBA overhead and non-prod provisioning pain likely",
+        "energy":          "Energy sector SAP/Oracle ERP + SCADA integration — multi-region ops and DR requirements",
+        "oil":             "Upstream/midstream Oracle ERP — DBA toil and DR needs common in this space",
+        "midstream":       "Midstream ops on Oracle ERP — pipeline management DB complexity, DR requirements",
+        "telecom":         "Telco billing/BSS systems on Oracle — highest DB complexity, 24/7 uptime, provisioning pain",
+        "telecommunications": "Telecom OSS/BSS Oracle stack — known DBA toil, automation needs, strong Tessell fit",
+        "manufacturing":   "Manufacturing ERP on Oracle/SAP — non-prod provisioning delays, DBA overhead common",
+        "automotive":      "Automotive manufacturer Oracle ERP + supply chain DB complexity — strong fit",
+        "logistics":       "Logistics WMS/TMS Oracle stack — DR requirements, multi-region ops",
+        "pharmaceutical":  "Pharma Oracle ERP + FDA compliance + DR requirements — strong Tessell fit",
+        "pharma":          "Pharma Oracle footprint + GxP validation requirements — DB automation need",
+        "defense":         "Defense Oracle ERP + FedRAMP/security compliance — mission-critical DB environment",
+        "aerospace":       "Aerospace Oracle ERP + engineering DB complexity — DR and HA requirements",
+        "retail":          "Retail Oracle/SAP ERP + seasonal scaling — provisioning and DR needs",
+    }
+
+    # Check for industry narrative
+    base_narrative = None
+    for ind_key, narrative in INDUSTRY_NARRATIVES.items():
+        if ind_key in ind_lower:
+            base_narrative = narrative
+            break
+
+    # Build signal-based additions
     if not signals:
-        return "Enterprise-qualified — no live signals yet"
-    kws: Set[str] = set()
+        if base_narrative:
+            return base_narrative
+        return "Enterprise-qualified — no live signals yet. Run discovery scan for signal details."
+
+    kws: set = set()
+    signal_types: list = []
     for s in signals:
         extracted = (s.extracted_keywords if hasattr(s, "extracted_keywords")
                      else s.get("extracted_keywords", []))
-        kws.update(extracted)
+        kws.update(k.lower() for k in extracted)
+        sig_type = (s.signal_type if hasattr(s, "signal_type")
+                    else s.get("signal_type", ""))
+        if sig_type:
+            signal_types.append(sig_type)
 
-    oracle_kws     = {"oracle","oracle dba","oracle rac","oracle exadata","oracle licensing","oracle cost"}
-    db_pain_kws    = {"dba toil","database reliability","dbre","database-as-a-service","dbaas",
-                      "non-production database","copy data","database cloning","database automation"}
-    migration_kws  = {"cloud migration","database migration","database modernization",
-                      "data center exit","erp migration","sap migration"}
-    hiring_kws     = {"database administrator","dba","database engineer","database reliability",
-                      "platform engineer","site reliability","sre","database platform"}
-    timing_kws     = {"new cio","new cto","acquisition","merger","digital transformation"}
+    signal_parts = []
 
-    parts = []
+    # Oracle-specific signals
+    oracle_kws = {"oracle","oracle dba","oracle rac","oracle exadata","oracle licensing","oracle cost","oracle migration"}
     if hit := kws & oracle_kws:
-        parts.append(f"Oracle: {', '.join(sorted(hit)[:2])}")
-    if hit := kws & db_pain_kws:
-        parts.append(f"DB pain: {', '.join(sorted(hit)[:2])}")
-    if hit := kws & migration_kws:
-        parts.append(f"Migration intent: {', '.join(sorted(hit)[:2])}")
+        signal_parts.append(f"Oracle footprint confirmed ({', '.join(sorted(hit)[:2])})")
+
+    # Hiring surge
+    hiring_kws = {"oracle dba","database administrator","dba","database reliability","dbre",
+                  "database engineer","platform engineer","sre","site reliability"}
     if hit := kws & hiring_kws:
-        parts.append(f"Hiring: {', '.join(sorted(hit)[:3])}")
+        signal_parts.append(f"Active DB/SRE hiring ({', '.join(sorted(hit)[:2])})")
+
+    # Cloud/migration
+    migration_kws = {"cloud migration","database migration","oracle migration","modernization",
+                     "data center exit","erp migration","sap migration"}
+    if hit := kws & migration_kws:
+        signal_parts.append(f"Migration/modernization in progress ({', '.join(sorted(hit)[:2])})")
+
+    # DR/resilience
+    dr_kws = {"disaster recovery","backup","high availability","failover","rpo","rto","downtime"}
+    if hit := kws & dr_kws:
+        signal_parts.append(f"DR/resilience signals ({', '.join(sorted(hit)[:2])})")
+
+    # M&A / leadership
+    timing_kws = {"acquisition","merger","new cio","new cto","appointed","leadership change"}
     if hit := kws & timing_kws:
-        parts.append(f"Timing: {', '.join(sorted(hit)[:2])}")
+        signal_parts.append(f"Timing trigger: {', '.join(sorted(hit)[:2])}")
 
-    return "; ".join(parts) if parts else "Database/infrastructure signals detected"
+    if signal_parts:
+        result = "; ".join(signal_parts)
+        if base_narrative:
+            result = base_narrative.split("—")[0].strip() + " — " + result
+        return result
 
+    if base_narrative:
+        return base_narrative
 
-# ════════════════════════════════════════════════════════════════════
-# COMPANY NAME EXTRACTION (for news-based sources)
-# ════════════════════════════════════════════════════════════════════
-
-# Words that are technology products / vendors — not customer companies
-TECH_VENDORS = {
-    "oracle","microsoft","amazon","aws","google","ibm","sap","salesforce",
-    "workday","servicenow","snowflake","databricks","cloudera","teradata",
-    "dell","hewlett","vmware","cisco","netapp","pure storage","nutanix",
-}
-
-# ── Media/publisher domain filters ───────────────────────────────────────────
-# These domains publish ABOUT companies but are not buyers themselves.
-
-# Skip entirely — market research blogs, SEO content farms
-SKIP_DOMAINS: set = {
-    'themarketsdaily','247wallst','marketsandresearch','marketswatch',
-    'businessmarketinsights','grandviewresearch','mordorintelligence',
-    'alliedmarketresearch','transparencymarketresearch','databridgemarketresearch',
-    'verifiedmarketresearch','reportlinker','businessresearchinsights',
-    'industryarc','fortunebusinessinsights','zionmarketresearch',
-    'marketresearchfuture','coherentmarketinsights','marketresearchstore',
-    'strategymrc','researchandmarkets','ibisworld','statista',
-    'fxstreet','investingcom','stockanalysis','simplywall',
-    'wisesheets','macrotrends','stockopedia',
-}
-
-# Wire services — contain real company news but domain is the wire, not the buyer
-# Extract company from headline, not from domain name
-WIRE_SERVICE_DOMAINS: set = {
-    'globenewswire','prnewswire','businesswire','accesswire',
-    'einpresswire','prweb','newswire','send2press','prlog',
-}
-
-# Investor/financial blogs — low confidence, extract company but flag
-INVESTOR_BLOG_DOMAINS: set = {
-    'seekingalpha','benzinga','motleyfool','thestreet','investorplace',
-    'zacks','marketbeat','fool','247wallstreet','schaeffersresearch',
-    'thefly','valuewalk','streetinsider',
-}
-
-# News media — extract company from headline, DO NOT use domain as company name
-NEWS_MEDIA_DOMAINS: set = {
-    'reuters','bloomberg','wsj','ft','cnbc','cnn','bbc','apnews',
-    'businessinsider','techcrunch','venturebeat','wired','axios',
-    'theregister','zdnet','computerworld','informationweek',
-    'dallasnews','chron','oklahoman','kansascity','star',
-    'dallasobserver','houstonpress','texastribune',
-}
-
-ALL_NON_BUYER_DOMAINS = SKIP_DOMAINS | WIRE_SERVICE_DOMAINS | INVESTOR_BLOG_DOMAINS | NEWS_MEDIA_DOMAINS
+    return "Enterprise-qualified with signals collected — check score evidence for details"
 
 
 def domain_filter(domain: str) -> str:
