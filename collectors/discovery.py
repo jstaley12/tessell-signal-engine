@@ -1,321 +1,104 @@
 """
-collectors/discovery.py  —  Tessell Signal Engine  |  Phase 2
+collectors/discovery.py  —  Tessell Signal Engine  |  Phase 1
 ════════════════════════════════════════════════════════════════════
-Autonomous territory discovery engine.
+Standardized signal ingestion — spec-compliant feed hierarchy.
 
-ARCHITECTURE: Structured APIs only. No HTML scraping. No guessing slugs.
-No robots.txt risk. No JS-rendering required.
+PRIMARY SOURCES (Phase 1):
+  1. SEC EDGAR full-text search
+       Oracle/DB mentions, M&A complexity, cloud modernization spend,
+       legacy infrastructure risk disclosures.
+       No auth. Government API. Reliable on any hosting environment.
 
-SOURCES (in reliability order):
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  2. NewsAPI.org
+       CIO/CTO leadership changes, acquisitions, modernization
+       announcements, partnerships, outages/incidents.
+       Free key: 100 req/day. Add NEWSAPI_KEY to Streamlit secrets.
 
-Tier 1 — No API key, no auth, works from Streamlit Cloud (AWS IPs):
-  ✅ SEC EDGAR full-text search API
-       efts.sec.gov — public, no rate limit, returns entity_name+ticker+state
-       Finds public companies that mentioned Oracle/database in 10-K/10-Q
-       Company name is a DIRECT field — no extraction needed
-       Coverage: all public companies that file with SEC
+  3. Major RSS feeds (Reuters, MarketWatch, BusinessWire, PRNewswire,
+                      GlobeNewswire IT feed)
+       Company announcements, expansions, earnings commentary,
+       cloud/digital transformation press releases.
+       No auth. Reliable on AWS.
 
-  ✅ GDELT DOC 2.0 API
-       api.gdeltproject.org — research API, no auth, designed for bulk access
-       Near real-time news index covering 65+ countries
-       Queries: "Oracle database Texas", "CIO appointed Texas", etc.
-       Company name extracted from news headlines (NLP patterns)
-       Coverage: any company that appears in news
+SECONDARY SOURCES (Phase 2 - lower signal weight):
+  4. Careers/jobs pages — Oracle DBA hiring signals (future).
 
-  ✅ State seed list
-       Hardcoded known Fortune-tier enterprise anchors per state
-       Guaranteed enterprise — used as baseline, never as primary signal
-       Always included unless explicitly disabled
+REMOVED (not in spec):
+  - GDELT
+  - SerpAPI
+  - Bing Search API
+  - Google News RSS (blocked on AWS IPs)
+  - Greenhouse/Lever slug guessing
 
-Tier 2 — Free API key (add to Streamlit secrets):
-  ✅ NewsAPI.org  (NEWSAPI_KEY)
-       Free: 100 req/day. Returns structured articles with company context.
-       More reliable than GDELT for US business news.
-       Sign up: newsapi.org
-
-  ✅ USAJobs.gov  (no key needed)
-       Federal job API — guaranteed enterprise (government contractors)
-       Returns OrganizationName directly — no extraction
-       Good for TX/OK/KS defense/energy contractors
-
-Tier 3 — Paid keys (best quality):
-  ✅ SerpAPI  (SERPAPI_KEY, $50/mo)
-       Google Jobs structured results — company_name is a direct field
-       Most reliable job-based company discovery
-       serpapi.com
-
-  ✅ Bing Search API  (BING_API_KEY, $3-7/1000 queries)
-       Returns structured web results — good company name extraction
-       Works perfectly from AWS (Microsoft's own cloud)
-       azure.microsoft.com/cognitive-services/bing/web-search
-
-NOT USED (removed per spec):
-  ✗ Greenhouse/Lever slug guessing — removed
-  ✗ Careers page HTML scraping — removed
-  ✗ Newsroom HTML scraping — removed
-  ✗ Google News RSS — blocked on AWS/Streamlit Cloud IPs
-  ✗ Indeed RSS — rate-limited and blocked on data-center IPs
-════════════════════════════════════════════════════════════════════
+RULES:
+  - No account ranks in Discovery mode without source evidence.
+  - Show source + date + signal on each card.
+  - Fresh signals outrank static seed accounts.
+  - Seed/named accounts in a SEPARATE LIST, never mixed into live rankings.
 """
-
 from __future__ import annotations
 
 import re
 import time
-import json
-import os
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import List, Optional, Dict, Set, Tuple
-from urllib.parse import quote_plus, urlparse
+from urllib.parse import quote_plus
 
 from loguru import logger
 
 from collectors.fetcher import fetch_json, fetch_html, FetchLog
 from collectors.signal import (
     LiveSignal, is_relevant, extract_keywords,
-    detect_state, detect_city, enterprise_relevance,
+    detect_state, detect_city,
+    CITY_STATE, STATE_NAMES,
 )
 
-
 # ════════════════════════════════════════════════════════════════════
-# DISCOVERY TYPE CLASSIFICATION
+# FEED CONFIGURATION
 # ════════════════════════════════════════════════════════════════════
 
-def classify_discovery_type(discovery_source: str) -> str:
-    """
-    live_discovered  — found entirely from live structured API calls
-    fallback_seed    — only from the static state seed list
-    mixed_source     — seed list company that also got live signals
-    """
-    sources = set(s.strip() for s in discovery_source.split("+") if s.strip())
-    has_seed = "state_seed_list" in sources
-    has_live = bool(sources - {"state_seed_list"})
-    if has_seed and has_live:
-        return "mixed_source"
-    if has_seed:
-        return "fallback_seed"
-    return "live_discovered"
-
-
-def why_discovered(discovery_source: str, signals: list) -> str:
-    """Plain-English explanation of why this company was surfaced."""
-    sources = set(s.strip() for s in discovery_source.split("+") if s.strip())
-    reasons = []
-    if "sec_edgar"       in sources: reasons.append("mentioned Oracle/database in SEC 10-K/10-Q filing")
-    if "gdelt"           in sources: reasons.append("appeared in news: Oracle/cloud/transformation/leadership")
-    if "newsapi"         in sources: reasons.append("featured in business news for DB/cloud/leadership signals")
-    if "serpapi_jobs"    in sources: reasons.append("actively hiring Oracle/DBA/SRE roles (Google Jobs)")
-    if "bing_search"     in sources: reasons.append("surfaced in enterprise tech search results")
-    if "usajobs"         in sources: reasons.append("posting federal contractor roles in target territory")
-    if "state_seed_list" in sources: reasons.append("known Fortune-tier enterprise anchor for this state")
-    return "; ".join(reasons) if reasons else "discovered from live signals"
-
-
-def tessell_relevance_reason(company_name: str, industry: str, signals: list) -> str:
-    """
-    Generate the 'Why Tessell Now' narrative.
-    Uses inferred industry complexity + actual signals found.
-    This is what a rep sees on the card to decide whether to call.
-    """
-    ind_lower = (industry or "").lower()
-    name_lower = company_name.lower()
-
-    # Industry-based narratives (inferred, no signals needed)
-    INDUSTRY_NARRATIVES = {
-        "airline":         "Airline ops require 24/7 Oracle uptime for reservations, loyalty, and revenue mgmt — known DB complexity",
-        "airlines":        "Airline ops require 24/7 Oracle uptime for reservations, loyalty, and revenue mgmt — known DB complexity",
-        "hospital":        "Hospital systems run Oracle/Epic EHR with strict HIPAA DR requirements — high DBA toil environment",
-        "health system":   "Health system Oracle/EHR workloads + HIPAA compliance = strong Tessell fit",
-        "healthcare":      "Healthcare Oracle footprint + DR/HA requirements — known DB complexity, strong Tessell fit",
-        "banking":         "Core banking on Oracle/SQL Server, 24/7 uptime SLA, regulatory compliance — prime Tessell territory",
-        "financial":       "Financial services Oracle dependency + audit/compliance pressure — strong DB automation need",
-        "insurance":       "Insurance policy/claims systems on Oracle — DBA overhead and non-prod provisioning pain likely",
-        "energy":          "Energy sector SAP/Oracle ERP + SCADA integration — multi-region ops and DR requirements",
-        "oil":             "Upstream/midstream Oracle ERP — DBA toil and DR needs common in this space",
-        "midstream":       "Midstream ops on Oracle ERP — pipeline management DB complexity, DR requirements",
-        "telecom":         "Telco billing/BSS systems on Oracle — highest DB complexity, 24/7 uptime, provisioning pain",
-        "telecommunications": "Telecom OSS/BSS Oracle stack — known DBA toil, automation needs, strong Tessell fit",
-        "manufacturing":   "Manufacturing ERP on Oracle/SAP — non-prod provisioning delays, DBA overhead common",
-        "automotive":      "Automotive manufacturer Oracle ERP + supply chain DB complexity — strong fit",
-        "logistics":       "Logistics WMS/TMS Oracle stack — DR requirements, multi-region ops",
-        "pharmaceutical":  "Pharma Oracle ERP + FDA compliance + DR requirements — strong Tessell fit",
-        "pharma":          "Pharma Oracle footprint + GxP validation requirements — DB automation need",
-        "defense":         "Defense Oracle ERP + FedRAMP/security compliance — mission-critical DB environment",
-        "aerospace":       "Aerospace Oracle ERP + engineering DB complexity — DR and HA requirements",
-        "retail":          "Retail Oracle/SAP ERP + seasonal scaling — provisioning and DR needs",
-    }
-
-    # Check for industry narrative
-    base_narrative = None
-    for ind_key, narrative in INDUSTRY_NARRATIVES.items():
-        if ind_key in ind_lower:
-            base_narrative = narrative
-            break
-
-    # Build signal-based additions
-    if not signals:
-        if base_narrative:
-            return base_narrative
-        return "Enterprise-qualified — no live signals yet. Run discovery scan for signal details."
-
-    kws: set = set()
-    signal_types: list = []
-    for s in signals:
-        extracted = (s.extracted_keywords if hasattr(s, "extracted_keywords")
-                     else s.get("extracted_keywords", []))
-        kws.update(k.lower() for k in extracted)
-        sig_type = (s.signal_type if hasattr(s, "signal_type")
-                    else s.get("signal_type", ""))
-        if sig_type:
-            signal_types.append(sig_type)
-
-    signal_parts = []
-
-    # Oracle-specific signals
-    oracle_kws = {"oracle","oracle dba","oracle rac","oracle exadata","oracle licensing","oracle cost","oracle migration"}
-    if hit := kws & oracle_kws:
-        signal_parts.append(f"Oracle footprint confirmed ({', '.join(sorted(hit)[:2])})")
-
-    # Hiring surge
-    hiring_kws = {"oracle dba","database administrator","dba","database reliability","dbre",
-                  "database engineer","platform engineer","sre","site reliability"}
-    if hit := kws & hiring_kws:
-        signal_parts.append(f"Active DB/SRE hiring ({', '.join(sorted(hit)[:2])})")
-
-    # Cloud/migration
-    migration_kws = {"cloud migration","database migration","oracle migration","modernization",
-                     "data center exit","erp migration","sap migration"}
-    if hit := kws & migration_kws:
-        signal_parts.append(f"Migration/modernization in progress ({', '.join(sorted(hit)[:2])})")
-
-    # DR/resilience
-    dr_kws = {"disaster recovery","backup","high availability","failover","rpo","rto","downtime"}
-    if hit := kws & dr_kws:
-        signal_parts.append(f"DR/resilience signals ({', '.join(sorted(hit)[:2])})")
-
-    # M&A / leadership
-    timing_kws = {"acquisition","merger","new cio","new cto","appointed","leadership change"}
-    if hit := kws & timing_kws:
-        signal_parts.append(f"Timing trigger: {', '.join(sorted(hit)[:2])}")
-
-    if signal_parts:
-        result = "; ".join(signal_parts)
-        if base_narrative:
-            result = base_narrative.split("—")[0].strip() + " — " + result
-        return result
-
-    if base_narrative:
-        return base_narrative
-
-    return "Enterprise-qualified with signals collected — check score evidence for details"
-
-
-def domain_filter(domain: str) -> str:
-    """
-    Returns one of:
-      'skip'        — market research / SEO content farm — ignore completely
-      'wire'        — press wire — extract real company FROM headline
-      'media'       — news/investor blog — extract company, low confidence
-      'company'     — domain looks like a real company website
-    """
-    if not domain:
-        return 'company'
-    d = domain.lower().split('.')[0].replace('-','').replace('_','')
-    if any(s in d for s in SKIP_DOMAINS):
-        return 'skip'
-    if any(s in d for s in WIRE_SERVICE_DOMAINS):
-        return 'wire'
-    if any(s in d for s in INVESTOR_BLOG_DOMAINS | NEWS_MEDIA_DOMAINS):
-        return 'media'
-    return 'company'
-
-
-NOT_COMPANY_WORDS = {
-    "the","a","an","in","at","for","on","of","and","or","with","by",
-    "texas","oklahoma","kansas","dallas","houston","tulsa","wichita",
-    "new","report","says","announces","hires","names","joins","appoints",
-    "database","cloud","digital","enterprise","technology","tech","it",
-    "company","inc","corp","llc","ltd","group","holdings",
-    "oracle","database","migration","transformation","modernization",
+# EDGAR: spec topics → search term → signal label
+EDGAR_TERMS = {
+    '"Oracle database"':        "oracle_mention",
+    '"Oracle licensing"':       "oracle_cost",
+    '"database modernization"': "modernization",
+    '"cloud migration"':        "cloud_migration",
+    '"legacy database"':        "legacy_risk",
 }
 
-COMPANY_SUFFIXES = re.compile(
-    r'\s*,?\s*(?:Inc\.?|Corp\.?|Corporation|LLC\.?|Ltd\.?|Limited|'
-    r'Co\.?|Group|Holdings?|Technologies?|Technology|Systems?|'
-    r'Solutions?|Services?|Enterprises?|Industries?|International|'
-    r'Global|National|Partners?|Capital|Financial|Energy|Airlines?|'
-    r'Healthcare|Health|Medical|Pharma|Defense|Aerospace)\.?\s*$',
-    re.IGNORECASE
-)
+# NewsAPI: spec topics (state_name injected at runtime)
+NEWSAPI_QUERIES = {
+    'new CIO OR new CTO OR "appointed CIO" OR "appointed CTO" {state_name}': "leadership_change",
+    'acquisition OR merger {state_name} enterprise technology':               "ma_event",
+    '"cloud migration" OR "digital transformation" {state_name} enterprise':  "modernization",
+    '"Oracle database" OR "Oracle DBA" {state_name}':                        "oracle_pain",
+    'outage OR incident OR downtime {state_name} technology enterprise':      "outage",
+}
 
+# RSS feeds per spec
+RSS_FEEDS = [
+    {"url": "https://feeds.reuters.com/reuters/businessNews",
+     "name": "Reuters Business",     "type": "reuters_rss"},
+    {"url": "https://feeds.marketwatch.com/marketwatch/topstories/",
+     "name": "MarketWatch",          "type": "marketwatch_rss"},
+    {"url": "https://www.prnewswire.com/rss/technology-latest-news.rss",
+     "name": "PR Newswire Tech",     "type": "prnewswire_rss"},
+    {"url": "https://feed.businesswire.com/rss/home/?rss=G22",
+     "name": "BusinessWire",         "type": "businesswire_rss"},
+    {"url": "https://www.globenewswire.com/RssFeed/subjectcode/28-Information+Technology",
+     "name": "GlobeNewswire IT",     "type": "globenewswire_rss"},
+]
 
-def extract_companies_from_text(text: str) -> List[str]:
-    """
-    Extract likely enterprise company names from a news headline or article snippet.
-    Uses conservative patterns to minimize false positives.
-    """
-    candidates = []
-    text = text.strip()
-
-    # Pattern 1: "CompanyName [verb] [news action]"
-    action_verbs = (
-        r'(?:announced?|said|named?|hired?|appoints?|acquires?|launches?|'
-        r'expands?|reports?|beats?|misses?|partners?|selects?|signs?|'
-        r'completes?|closes?|raises?|invests?|upgrades?|migrates?|transforms?)'
-    )
-    p1 = re.findall(
-        rf'([A-Z][A-Za-z&\-\.\']+(?:\s+[A-Z][A-Za-z&\-\.\']+){{0,3}})\s+{action_verbs}',
-        text
-    )
-    candidates.extend(p1)
-
-    # Pattern 2: "[verb] at/for CompanyName"
-    p2 = re.findall(
-        r'(?:at|for|with|join(?:ing|ed)?|from)\s+([A-Z][A-Za-z&\-\.\']+(?:\s+[A-Z][A-Za-z&\-\.\']+){0,3})',
-        text
-    )
-    candidates.extend(p2)
-
-    # Pattern 3: "CompanyName's" possessive
-    p3 = re.findall(r"([A-Z][A-Za-z&\-\.\']+(?:\s+[A-Z][A-Za-z&\-\.\']+){0,2})'s\s", text)
-    candidates.extend(p3)
-
-    # Clean and filter
-    result = []
-    for name in candidates:
-        name = name.strip().rstrip('.,;:')
-        # Remove trailing suffix words
-        name = COMPANY_SUFFIXES.sub('', name).strip()
-        if len(name) < 3 or len(name) > 50:
-            continue
-        name_lower = name.lower()
-        first_word = name_lower.split()[0] if name_lower.split() else ""
-        if first_word in NOT_COMPANY_WORDS or name_lower in TECH_VENDORS:
-            continue
-        # Must start with capital letter
-        if not name[0].isupper():
-            continue
-        result.append(name)
-
-    return list(dict.fromkeys(result))  # dedup preserving order
-
-
-def clean_company_name(name: str) -> str:
-    """Normalize for dedup matching."""
-    cleaned = COMPANY_SUFFIXES.sub('', name).strip()
-    return ' '.join(cleaned.split()).lower()
-
+STATE_FULL_NAMES = {v: k.title() for k, v in STATE_NAMES.items()}
 
 # ════════════════════════════════════════════════════════════════════
-# DISCOVERED COMPANY MODEL
+# COMPANY MODEL
 # ════════════════════════════════════════════════════════════════════
 
 @dataclass
 class DiscoveredCompany:
     name:             str
-    domain:           Optional[str]    = None
     hq_state:         Optional[str]    = None
     hq_city:          Optional[str]    = None
     industry:         Optional[str]    = None
@@ -332,73 +115,113 @@ class DiscoveredCompany:
 
     def to_dict(self) -> dict:
         return {
-            "name":               self.name,
-            "domain":             self.domain,
-            "hq_state":           self.hq_state,
-            "hq_city":            self.hq_city,
-            "industry":           self.industry,
-            "estimated_employees":self.estimated_employees,
-            "is_public":          self.is_public,
-            "ticker":             self.ticker,
-            "fortune_rank":       self.fortune_rank,
-            "discovery_source":   self.discovery_source,
-            "signal_count":       len(self.signals),
-            "confidence":         self.confidence,
-            "discovery_date":     self.discovery_date,
+            "name":             self.name,
+            "hq_state":         self.hq_state,
+            "hq_city":          self.hq_city,
+            "industry":         self.industry,
+            "is_public":        self.is_public,
+            "ticker":           self.ticker,
+            "fortune_rank":     self.fortune_rank,
+            "discovery_source": self.discovery_source,
+            "signal_count":     len(self.signals),
+            "confidence":       self.confidence,
+            "discovery_date":   self.discovery_date,
         }
 
 
 # ════════════════════════════════════════════════════════════════════
-# SOURCE 1: SEC EDGAR  ✅ No auth, government API, AWS-friendly
+# COMPANY NAME EXTRACTION
 # ════════════════════════════════════════════════════════════════════
 
-# Oracle/DB-related terms to search in 10-K/10-Q filings
-EDGAR_SEARCH_TERMS = [
-    '"Oracle database"',
-    '"Oracle licensing"',
-    '"database infrastructure"',
-    '"database modernization"',
-    '"Oracle ERP"',
-]
+NOT_COMPANY_WORDS = {
+    "the","a","an","in","at","for","on","of","and","or","with","by","from","to",
+    "new","report","says","announced","announces","hires","names","joins","appoints",
+    "database","cloud","digital","enterprise","technology","tech","it","company",
+    "oracle","sql","microsoft","amazon","google","ibm","sap","data","platform",
+    "texas","oklahoma","kansas","dallas","houston","tulsa","wichita","austin",
+    "inc","corp","llc","ltd","group","holdings","markets","research","global",
+    "news","media","press","wire","daily","weekly","report","blog","analysis",
+}
 
-# State code to SEC state filter mapping
-EDGAR_STATE_CODES: Dict[str, str] = {
-    "TX":"TX","OK":"OK","KS":"KS","AR":"AR","MO":"MO",
-    "CO":"CO","NM":"NM","AZ":"AZ","LA":"LA","TN":"TN",
-    "IN":"IN","MN":"MN","GA":"GA","FL":"FL","NC":"NC",
-    "VA":"VA","IL":"IL","OH":"OH","MI":"MI","PA":"PA",
-    "NY":"NY","CA":"CA","WA":"WA","MA":"MA","TX":"TX",
+DB_VENDOR_NAMES = {
+    "oracle","oracle corp","oracle corporation","snowflake","mongodb","databricks",
+    "cloudera","teradata","couchbase","datastax","cockroachdb","neo4j","redis",
+    "influxdata","yugabyte","memsql","singlestore","dremio","starburst","percona",
+    "amazon","amazon.com","microsoft","google","alphabet","ibm","vmware","nutanix",
+}
+
+MEDIA_PUBLISHER_NAMES = {
+    "reuters","bloomberg","wsj","cnbc","cnn","bbc","marketwatch","techcrunch",
+    "businessinsider","venturebeat","wired","axios","theverge","zdnet",
+    "computerworld","informationweek","seekingalpha","benzinga","motleyfool",
+    "prnewswire","businesswire","globenewswire","accesswire","apnews",
 }
 
 
-def discover_from_edgar(state: str, max_companies: int = 25) -> Tuple[List[DiscoveredCompany], dict]:
-    """
-    ✅ RELIABLE — SEC EDGAR full-text search.
-    Endpoint: https://efts.sec.gov/LATEST/search-index
-    No auth, no rate limit (use reasonably), AWS-friendly.
+def _clean_name(name: str) -> str:
+    cleaned = re.sub(
+        r'\s*,?\s*(?:Inc\.?|Corp\.?|Corporation|LLC\.?|Ltd\.?|Limited|'
+        r'Co\.?|Group|Holdings?|Technologies?|Systems?|Solutions?|'
+        r'Services?|Enterprises?|Industries?|International|Global|'
+        r'National|Partners?|Capital|Financial|Energy|Airlines?|'
+        r'Healthcare|Health|Medical)\.?\s*$',
+        '', name, flags=re.IGNORECASE
+    ).strip()
+    return ' '.join(cleaned.split()).lower()
 
-    Returns companies that mentioned Oracle/database keywords in recent
-    10-K or 10-Q filings. entity_name field is direct — no extraction.
-    Only covers public companies but all are Fortune-tier enterprises.
+
+def _is_valid_company(name: str) -> bool:
+    if len(name) < 3 or len(name) > 60:
+        return False
+    if not name[0].isupper():
+        return False
+    name_lower = name.lower()
+    first_word = name_lower.split()[0]
+    if first_word in NOT_COMPANY_WORDS:
+        return False
+    if name_lower in DB_VENDOR_NAMES:
+        return False
+    if any(p in name_lower for p in MEDIA_PUBLISHER_NAMES):
+        return False
+    return True
+
+
+def _extract_companies(text: str) -> List[str]:
+    candidates = []
+    action = (r'(?:announced?|said|named?|hired?|appoints?|acquires?|'
+              r'launches?|expands?|reports?|completes?|selects?|signs?|'
+              r'merges?|migrates?|transforms?|upgrades?|partners?)')
+    for pat in [
+        rf'([A-Z][A-Za-z&\-\.\']+(?:\s+[A-Z][A-Za-z&\-\.\']+){{0,3}})\s+{action}',
+        r'(?:at|for|with|join(?:ing|ed)?)\s+([A-Z][A-Za-z&\-\.\']+(?:\s+[A-Z][A-Za-z&\-\.\']+){0,3})',
+        r"([A-Z][A-Za-z&\-\.\']+(?:\s+[A-Z][A-Za-z&\-\.\']+){0,2})'s\s",
+    ]:
+        for m in re.finditer(pat, text):
+            name = m.group(1).strip().rstrip('.,;:')
+            if _is_valid_company(name):
+                candidates.append(name)
+    return list(dict.fromkeys(candidates))
+
+
+# ════════════════════════════════════════════════════════════════════
+# SOURCE 1: SEC EDGAR
+# ════════════════════════════════════════════════════════════════════
+
+def discover_from_edgar(state: str, max_companies: int = 30) -> Tuple[List[DiscoveredCompany], dict]:
     """
-    meta = {
-        "source":      "sec_edgar",
-        "queries_run": 0,
-        "total_hits":  0,
-        "accepted":    0,
-        "blocked":     False,
-    }
+    PRIMARY SOURCE 1 — SEC EDGAR full-text search.
+    No auth required. Finds public companies disclosing Oracle/DB/M&A/cloud topics.
+    Returns Tier 3 signals — EDGAR filings establish presence, not urgency.
+    """
+    meta = {"source":"sec_edgar","queries_run":0,"total_hits":0,"accepted":0,
+            "blocked":False,"error":None}
     discovered: Dict[str, DiscoveredCompany] = {}
+    cutoff = (datetime.utcnow() - timedelta(days=365)).strftime("%Y-%m-%d")
 
-    # Look back 18 months for filings
-    cutoff = (datetime.utcnow() - timedelta(days=548)).strftime("%Y-%m-%d")
-
-    for term in EDGAR_SEARCH_TERMS[:3]:  # 3 terms to stay well under rate limits
+    for term, signal_topic in list(EDGAR_TERMS.items())[:4]:
         url = (f"https://efts.sec.gov/LATEST/search-index"
-               f"?q={quote_plus(term)}"
-               f"&forms=10-K,10-Q"
+               f"?q={quote_plus(term)}&forms=10-K,10-Q"
                f"&dateRange=custom&startdt={cutoff}")
-
         data = fetch_json(url, source_name="sec_edgar")
         meta["queries_run"] += 1
 
@@ -406,49 +229,47 @@ def discover_from_edgar(state: str, max_companies: int = 25) -> Tuple[List[Disco
             last = FetchLog.entries[-1] if FetchLog.entries else None
             if last and "403" in last.status:
                 meta["blocked"] = True
+                meta["error"]   = f"HTTP 403 on {term}"
             continue
 
         hits = (data.get("hits") or {}).get("hits", [])
         meta["total_hits"] += len(hits)
         logger.info(f"[EDGAR] '{term}': {len(hits)} hits")
 
-        for hit in hits[:15]:
-            src         = hit.get("_source", {})
-            entity_name = (src.get("entity_name") or
-                           (src.get("display_names") or [""])[0] or "").strip()
-            ticker      = src.get("ticker", "")
-            inc_states  = src.get("inc_states") or src.get("location") or ""
-            form_type   = src.get("form_type", "10-K")
-            file_date   = src.get("file_date", "")
-            period      = src.get("period_of_report", "")
+        for hit in hits[:10]:
+            src        = hit.get("_source", {})
+            name       = (src.get("entity_name") or
+                         (src.get("display_names") or [""])[0] or "").strip()
+            ticker     = src.get("ticker","")
+            form_type  = src.get("form_type","10-K")
+            file_date  = src.get("file_date","")
+            period     = src.get("period_of_report","")
 
-            if not entity_name or len(entity_name) < 3:
-                continue
-
-            # State filter — keep if incorporated/located in target state
-            # Also keep if state unknown (EDGAR state data is inconsistent)
-            # inc_states can be a list or string depending on EDGAR response
+            inc_states = src.get("inc_states") or src.get("location") or ""
             if isinstance(inc_states, list):
                 inc_states = " ".join(inc_states)
             filing_state = detect_state(str(inc_states)) if inc_states else None
+
+            if not name or len(name) < 3 or not _is_valid_company(name):
+                continue
             if filing_state and filing_state != state:
-                continue  # Skip companies clearly HQ'd elsewhere
+                continue
 
             term_clean = term.strip('"')
-            kws = extract_keywords(f"{entity_name} {term_clean} oracle database")
+            snippet    = f"SEC {form_type} ({period}): mentions '{term_clean}' — {name}"
+            kws        = extract_keywords(f"{snippet} {term_clean}")
 
             sig = LiveSignal(
-                company_name=entity_name,
-                source_url=(f"https://efts.sec.gov/LATEST/search-index?"
-                            f"q={quote_plus(term)}&entity={quote_plus(entity_name)}"),
+                company_name=name,
+                source_url=f"https://efts.sec.gov/LATEST/search-index?q={quote_plus(term)}&entity={quote_plus(name)}",
                 source_type="sec_edgar",
                 date_found=file_date or datetime.utcnow().strftime("%Y-%m-%d"),
                 signal_type="transformation",
-                raw_snippet=f"SEC {form_type} ({period}): mentions '{term_clean}' — {entity_name}",
-                extracted_keywords=kws or ["oracle", "database"],
-                confidence_score=0.82,
+                raw_snippet=snippet,
+                extracted_keywords=kws or ["oracle","database"],
+                confidence_score=0.65,
                 state_detected=filing_state or state,
-                enterprise_relevance_score=0.72,
+                enterprise_relevance_score=0.60,
                 live_collected=True,
                 source_access_status="success",
                 parser_used="sec_efts_json",
@@ -456,18 +277,14 @@ def discover_from_edgar(state: str, max_companies: int = 25) -> Tuple[List[Disco
                 data_source="LIVE",
             )
 
-            key = clean_company_name(entity_name)
+            key = _clean_name(name)
             if not key:
                 continue
-
             if key not in discovered:
                 discovered[key] = DiscoveredCompany(
-                    name=entity_name,
-                    ticker=ticker or None,
-                    hq_state=filing_state or state,
-                    is_public=True,
-                    discovery_source="sec_edgar",
-                    confidence=0.82,
+                    name=name, ticker=ticker or None,
+                    hq_state=filing_state or state, is_public=True,
+                    discovery_source="sec_edgar", confidence=0.80,
                 )
             discovered[key].signals.append(sig)
             if ticker:
@@ -475,248 +292,40 @@ def discover_from_edgar(state: str, max_companies: int = 25) -> Tuple[List[Disco
 
         if len(discovered) >= max_companies:
             break
-
-        time.sleep(0.5)  # respectful rate limiting
+        time.sleep(0.4)
 
     meta["accepted"] = len(discovered)
-    logger.info(f"[EDGAR] {state}: {len(discovered)} companies from {meta['queries_run']} queries")
+    logger.info(f"[EDGAR] {state}: {len(discovered)} companies, blocked={meta['blocked']}")
     return list(discovered.values())[:max_companies], meta
 
 
 # ════════════════════════════════════════════════════════════════════
-# SOURCE 2: GDELT DOC 2.0  ✅ No auth, research API, AWS-friendly
-# ════════════════════════════════════════════════════════════════════
-
-# State name expansions for GDELT queries
-STATE_NAMES = {
-    "TX":"Texas","OK":"Oklahoma","KS":"Kansas","AR":"Arkansas",
-    "MO":"Missouri","CO":"Colorado","NM":"New Mexico","AZ":"Arizona",
-    "LA":"Louisiana","TN":"Tennessee","IN":"Indiana","MN":"Minnesota",
-    "GA":"Georgia","FL":"Florida","NC":"North Carolina","VA":"Virginia",
-    "IL":"Illinois","OH":"Ohio","MI":"Michigan","PA":"Pennsylvania",
-}
-
-GDELT_QUERY_TEMPLATES = [
-    '"{db_term}" "{state_name}" enterprise',
-    '"new CIO" OR "new CTO" "{state_name}"',
-    '"Oracle" "{state_name}" "database migration" OR "cloud migration"',
-    '"database administrator" "{state_name}" hiring',
-    '"digital transformation" "{state_name}" enterprise',
-    '"ERP migration" OR "SAP migration" "{state_name}"',
-]
-
-DB_TERMS = ["Oracle database", "SQL Server database", "database modernization",
-            "database migration", "Oracle DBA"]
-
-
-def discover_from_gdelt(state: str, max_companies: int = 30) -> Tuple[List[DiscoveredCompany], dict]:
-    """
-    ✅ RELIABLE — GDELT DOC 2.0 API.
-    Endpoint: https://api.gdeltproject.org/api/v2/doc/doc
-    No auth, no API key, designed for research/programmatic access.
-    Works from AWS IPs (Streamlit Cloud).
-
-    Returns news articles; extracts company names from headlines using NLP.
-    Covers enterprise news: leadership changes, transformation, Oracle/DB mentions.
-    """
-    meta = {
-        "source":           "gdelt",
-        "queries_run":      0,
-        "raw_articles":     0,
-        "relevant_articles":0,
-        "companies_found":  0,
-        "blocked":          False,
-    }
-
-    state_name = STATE_NAMES.get(state, state)
-    discovered: Dict[str, DiscoveredCompany] = {}
-
-    # Build targeted queries
-    queries = []
-    for db_term in DB_TERMS[:2]:
-        queries.append(f'"{db_term}" "{state_name}"')
-    for tmpl in GDELT_QUERY_TEMPLATES[:3]:
-        queries.append(tmpl.format(state_name=state_name, db_term=DB_TERMS[0]))
-
-    # GDELT date filter — last 90 days
-    end_dt   = datetime.utcnow()
-    start_dt = end_dt - timedelta(days=90)
-    startdt  = start_dt.strftime("%Y%m%d%H%M%S")
-    enddt    = end_dt.strftime("%Y%m%d%H%M%S")
-
-    for query in queries[:4]:
-        url = (f"https://api.gdeltproject.org/api/v2/doc/doc"
-               f"?query={quote_plus(query)}"
-               f"&mode=ArtList"
-               f"&maxrecords=25"
-               f"&startdatetime={startdt}"
-               f"&enddatetime={enddt}"
-               f"&sourcelang=english"
-               f"&sourcecountry=US"
-               f"&format=json")
-
-        data = fetch_json(url, source_name="gdelt")
-        meta["queries_run"] += 1
-
-        if not data:
-            last = FetchLog.entries[-1] if FetchLog.entries else None
-            if last and "403" in last.status:
-                meta["blocked"] = True
-                logger.warning(f"[GDELT] Blocked (403) — likely sandbox network allowlist")
-            else:
-                logger.info(f"[GDELT] No response for query: {query[:60]}")
-            continue
-
-        articles = data.get("articles", [])
-        meta["raw_articles"] += len(articles)
-        logger.info(f"[GDELT] '{query[:50]}': {len(articles)} articles")
-
-        for article in articles:
-            title      = article.get("title", "")
-            url_a      = article.get("url", "")
-            seendate   = article.get("seendate", "")
-            domain     = article.get("domain", "")
-
-            if not title:
-                continue
-
-            # Filter by domain type
-            dom_type = domain_filter(domain)
-            if dom_type == 'skip':
-                continue   # market research blog — ignore entirely
-
-            full_text = title
-            if not is_relevant(full_text):
-                meta["relevant_articles"] += 0
-                continue
-
-            meta["relevant_articles"] += 1
-
-            # Parse date from GDELT format: "20260419T143000Z"
-            try:
-                pub_date = datetime.strptime(seendate[:8], "%Y%m%d").strftime("%Y-%m-%d")
-            except Exception:
-                pub_date = datetime.utcnow().strftime("%Y-%m-%d")
-
-            # Extract company names from headline
-            companies = extract_companies_from_text(title)
-
-            # Use domain as company name ONLY if it looks like a real company site
-            # (not wire services, media, or market research blogs)
-            if domain and "." in domain and dom_type == 'company':
-                domain_co = domain.split(".")[0].replace("-"," ").title()
-                if len(domain_co) > 2 and domain_co.lower() not in NOT_COMPANY_WORDS:
-                    companies = [domain_co] + companies
-
-            # Confidence penalty for non-company domains
-            base_confidence = 0.68 if dom_type == 'company' else 0.52
-
-            kws      = extract_keywords(full_text)
-            sig_state = detect_state(full_text) or state
-
-            # Signal type classification
-            tl = title.lower()
-            if any(x in tl for x in ["appoint","named","cio","cto","new vp","hire","joins"]):
-                sig_type = "timing"
-            elif any(x in tl for x in ["acqui","merger","partner"]):
-                sig_type = "timing"
-            elif any(x in tl for x in ["migrat","transform","modern","cloud","sap"]):
-                sig_type = "transformation"
-            else:
-                sig_type = "pain"
-
-            for co_name in companies[:2]:
-                key = clean_company_name(co_name)
-                if not key or len(key) < 2:
-                    continue
-
-                sig = LiveSignal(
-                    company_name=co_name,
-                    source_url=url_a,
-                    source_type="gdelt",
-                    date_found=pub_date,
-                    signal_type=sig_type,
-                    raw_snippet=f"{title} | {domain}",
-                    extracted_keywords=kws,
-                    confidence_score=base_confidence,
-                    state_detected=sig_state,
-                    city_detected=detect_city(title),
-                    enterprise_relevance_score=enterprise_relevance(kws),
-                    live_collected=True,
-                    source_access_status="success",
-                    parser_used="gdelt_json",
-                    extraction_method="structured_api",
-                    data_source="LIVE",
-                )
-
-                if key not in discovered:
-                    discovered[key] = DiscoveredCompany(
-                        name=co_name,
-                        hq_state=sig_state,
-                        hq_city=detect_city(title),
-                        discovery_source="gdelt",
-                        confidence=0.68,
-                    )
-                discovered[key].signals.append(sig)
-
-            if len(discovered) >= max_companies:
-                break
-
-        if len(discovered) >= max_companies:
-            break
-
-        time.sleep(1.0)  # GDELT rate limiting
-
-    meta["companies_found"] = len(discovered)
-    logger.info(f"[GDELT] {state}: {len(discovered)} companies from "
-                f"{meta['queries_run']} queries, {meta['raw_articles']} articles")
-    return list(discovered.values())[:max_companies], meta
-
-
-# ════════════════════════════════════════════════════════════════════
-# SOURCE 3: NEWSAPI  ✅ Free key (100 req/day), AWS-friendly
+# SOURCE 2: NEWSAPI
 # ════════════════════════════════════════════════════════════════════
 
 def discover_from_newsapi(state: str, api_key: str,
-                           max_companies: int = 25) -> Tuple[List[DiscoveredCompany], dict]:
+                           max_companies: int = 30) -> Tuple[List[DiscoveredCompany], dict]:
     """
-    ✅ RELIABLE WITH KEY — NewsAPI.org
-    Free tier: 100 requests/day. Sign up at newsapi.org.
-    Add as NEWSAPI_KEY in Streamlit secrets.
-    Returns structured article data — more reliable than GDELT for US news.
+    PRIMARY SOURCE 2 — NewsAPI.org
+    Free key at newsapi.org (100 req/day). Add as NEWSAPI_KEY in Streamlit secrets.
+    Spec topics: CIO/CTO changes, M&A, modernization, Oracle pain, outages.
+    Signals from NewsAPI are Tier 1/2 depending on content.
     """
-    meta = {
-        "source":          "newsapi",
-        "queries_run":     0,
-        "raw_articles":    0,
-        "companies_found": 0,
-        "blocked":         False,
-        "error":           None,
-    }
+    meta = {"source":"newsapi","queries_run":0,"raw_articles":0,
+            "companies_found":0,"blocked":False,"error":None}
     if not api_key:
-        meta["error"] = "no_key"
+        meta["error"] = "no_key — add free key at newsapi.org to Streamlit secrets"
         return [], meta
 
-    state_name = STATE_NAMES.get(state, state)
+    state_name = STATE_FULL_NAMES.get(state, state)
     discovered: Dict[str, DiscoveredCompany] = {}
-
-    queries = [
-        f"Oracle database {state_name} enterprise",
-        f"database administrator hiring {state_name}",
-        f"CIO OR CTO appointed {state_name} company",
-        f"cloud migration OR digital transformation {state_name}",
-    ]
-
     cutoff = (datetime.utcnow() - timedelta(days=30)).strftime("%Y-%m-%d")
 
-    for query in queries[:3]:
-        url = (f"https://newsapi.org/v2/everything"
-               f"?q={quote_plus(query)}"
-               f"&language=en"
-               f"&sortBy=publishedAt"
-               f"&from={cutoff}"
-               f"&pageSize=20"
-               f"&apiKey={api_key}")
+    for query_tmpl, signal_topic in list(NEWSAPI_QUERIES.items())[:4]:
+        query = query_tmpl.format(state_name=state_name)
+        url   = (f"https://newsapi.org/v2/everything"
+                 f"?q={quote_plus(query)}&language=en&sortBy=publishedAt"
+                 f"&from={cutoff}&pageSize=20&apiKey={api_key}")
 
         data = fetch_json(url, source_name="newsapi")
         meta["queries_run"] += 1
@@ -729,39 +338,30 @@ def discover_from_newsapi(state: str, api_key: str,
             logger.warning(f"[NewsAPI] Error: {meta['error']}")
             break
 
-        articles = data.get("articles", [])
+        articles = data.get("articles",[])
         meta["raw_articles"] += len(articles)
-        logger.info(f"[NewsAPI] '{query[:50]}': {len(articles)} articles")
+        logger.info(f"[NewsAPI] '{query[:60]}': {len(articles)} articles")
 
         for article in articles:
-            title   = article.get("title","") or ""
-            desc    = article.get("description","") or ""
-            url_a   = article.get("url","")
-            pub     = (article.get("publishedAt","") or "")[:10]
-            source  = (article.get("source") or {}).get("name","")
+            title = (article.get("title")       or "").strip()
+            desc  = (article.get("description") or "").strip()
+            url_a = (article.get("url")         or "")
+            pub   = (article.get("publishedAt") or "")[:10]
 
-            full_text = f"{title} {desc}"
-            if not is_relevant(full_text):
+            full = f"{title} {desc}"
+            if not is_relevant(full):
                 continue
 
-            companies = extract_companies_from_text(full_text)
-            # NewsAPI source.name is often the publisher company
-            kws       = extract_keywords(full_text)
-            sig_state = detect_state(full_text) or state
+            companies = _extract_companies(full)
+            if not companies:
+                continue
 
-            tl = title.lower()
-            if any(x in tl for x in ["appoint","named","cio","cto","new vp","hire"]):
-                sig_type = "timing"
-            elif any(x in tl for x in ["acqui","merger"]):
-                sig_type = "timing"
-            elif any(x in tl for x in ["migrat","transform","modern","cloud"]):
-                sig_type = "transformation"
-            else:
-                sig_type = "pain"
+            kws       = extract_keywords(full)
+            sig_state = detect_state(full) or state
 
             for co_name in companies[:2]:
-                key = clean_company_name(co_name)
-                if not key or len(key) < 2:
+                key = _clean_name(co_name)
+                if not key:
                     continue
 
                 sig = LiveSignal(
@@ -769,13 +369,13 @@ def discover_from_newsapi(state: str, api_key: str,
                     source_url=url_a,
                     source_type="newsapi",
                     date_found=pub or datetime.utcnow().strftime("%Y-%m-%d"),
-                    signal_type=sig_type,
+                    signal_type=signal_topic,
                     raw_snippet=f"{title} | {desc[:200]}",
                     extracted_keywords=kws,
-                    confidence_score=0.72,
+                    confidence_score=0.78,
                     state_detected=sig_state,
-                    city_detected=detect_city(full_text),
-                    enterprise_relevance_score=enterprise_relevance(kws),
+                    city_detected=detect_city(full),
+                    enterprise_relevance_score=0.68,
                     live_collected=True,
                     source_access_status="success",
                     parser_used="newsapi_json",
@@ -785,10 +385,9 @@ def discover_from_newsapi(state: str, api_key: str,
 
                 if key not in discovered:
                     discovered[key] = DiscoveredCompany(
-                        name=co_name,
-                        hq_state=sig_state,
-                        discovery_source="newsapi",
-                        confidence=0.72,
+                        name=co_name, hq_state=sig_state,
+                        hq_city=detect_city(full),
+                        discovery_source="newsapi", confidence=0.78,
                     )
                 discovered[key].signals.append(sig)
 
@@ -796,7 +395,7 @@ def discover_from_newsapi(state: str, api_key: str,
                 break
         if len(discovered) >= max_companies:
             break
-        time.sleep(0.5)
+        time.sleep(0.3)
 
     meta["companies_found"] = len(discovered)
     logger.info(f"[NewsAPI] {state}: {len(discovered)} companies")
@@ -804,370 +403,273 @@ def discover_from_newsapi(state: str, api_key: str,
 
 
 # ════════════════════════════════════════════════════════════════════
-# SOURCE 4: SERPAPI  ✅ Paid key, best job discovery
+# SOURCE 3: MAJOR RSS FEEDS
 # ════════════════════════════════════════════════════════════════════
 
-SERP_JOB_QUERIES = [
-    "Oracle DBA {state_name}",
-    "database reliability engineer {state_name}",
-    "SQL Server DBA {state_name}",
-    "platform engineer database {state_name}",
-    "cloud database engineer {state_name}",
-    "database modernization {state_name}",
-]
+def _parse_rss_date(raw: str) -> str:
+    if not raw:
+        return datetime.utcnow().strftime("%Y-%m-%d")
+    try:
+        from email.utils import parsedate_to_datetime
+        return parsedate_to_datetime(raw).strftime("%Y-%m-%d")
+    except Exception:
+        pass
+    m = re.search(r'(\d{4}-\d{2}-\d{2})', raw)
+    return m.group(1) if m else datetime.utcnow().strftime("%Y-%m-%d")
 
 
-def discover_from_serpapi(state: str, api_key: str,
-                           max_companies: int = 30) -> Tuple[List[DiscoveredCompany], dict]:
+def discover_from_rss(state: str, max_companies: int = 30) -> Tuple[List[DiscoveredCompany], dict]:
     """
-    ✅ BEST JOB DISCOVERY — SerpAPI Google Jobs.
-    $50/month. company_name is a direct structured field — no extraction.
-    Sign up: serpapi.com. Add as SERPAPI_KEY in Streamlit secrets.
+    PRIMARY SOURCE 3 — Reuters, MarketWatch, BusinessWire, PRNewswire, GlobeNewswire IT.
+    No auth required. Parses company announcements relevant to target state.
     """
-    meta = {
-        "source":          "serpapi_jobs",
-        "queries_run":     0,
-        "raw_jobs":        0,
-        "companies_found": 0,
-        "error":           None,
-    }
-    if not api_key:
-        meta["error"] = "no_key"
-        return [], meta
-
-    state_name = STATE_NAMES.get(state, state)
+    meta = {"source":"rss_feeds","feeds_tried":0,"feeds_ok":0,"raw_items":0,
+            "relevant_items":0,"companies_found":0,"blocked_feeds":[],"errors":[]}
     discovered: Dict[str, DiscoveredCompany] = {}
+    state_name = (STATE_FULL_NAMES.get(state, state) or state).lower()
 
-    for tmpl in SERP_JOB_QUERIES[:4]:
-        query = tmpl.format(state_name=state_name)
-        url   = (f"https://serpapi.com/search.json"
-                 f"?engine=google_jobs"
-                 f"&q={quote_plus(query)}"
-                 f"&location={quote_plus(state_name)}"
-                 f"&hl=en"
-                 f"&api_key={api_key}")
+    for feed in RSS_FEEDS:
+        feed_url  = feed["url"]
+        feed_name = feed["name"]
+        feed_type = feed["type"]
+        meta["feeds_tried"] += 1
 
-        data = fetch_json(url, source_name="serpapi")
-        meta["queries_run"] += 1
-
-        if not data:
+        html = fetch_html(feed_url, source_name=feed_type)
+        if not html:
+            last = FetchLog.entries[-1] if FetchLog.entries else None
+            if last and ("403" in last.status or "blocked" in last.status):
+                meta["blocked_feeds"].append(feed_name)
+            else:
+                meta["errors"].append(f"{feed_name}: no response")
             continue
-        if data.get("error"):
-            meta["error"] = data["error"]
-            logger.warning(f"[SerpAPI] Error: {meta['error']}")
-            break
 
-        jobs = data.get("jobs_results", [])
-        meta["raw_jobs"] += len(jobs)
-        logger.info(f"[SerpAPI] '{query}': {len(jobs)} jobs")
+        meta["feeds_ok"] += 1
+        try:
+            from bs4 import BeautifulSoup
+            soup  = BeautifulSoup(html, "lxml-xml")
+            items = soup.find_all("item")
+            if not items:
+                soup  = BeautifulSoup(html, "lxml")
+                items = soup.find_all("item")
 
-        for job in jobs:
-            co_name  = job.get("company_name","").strip()
-            location = job.get("location","")
-            title    = job.get("title","")
-            desc     = (job.get("description","") or "")[:400]
+            meta["raw_items"] += len(items)
+            logger.info(f"[RSS/{feed_name}] {len(items)} items")
 
-            if not co_name or len(co_name) < 2:
-                continue
+            for item in items:
+                title_el = item.find("title")
+                desc_el  = item.find("description")
+                link_el  = item.find("link")
+                date_el  = item.find("pubDate") or item.find("dc:date")
 
-            # State filter
-            sig_state = detect_state(location) or state
-            if sig_state != state:
-                continue
+                title    = title_el.get_text(strip=True) if title_el else ""
+                desc     = desc_el.get_text(strip=True)  if desc_el  else ""
+                link     = link_el.get_text(strip=True)  if link_el  else feed_url
+                pub_date = _parse_rss_date(date_el.get_text(strip=True) if date_el else "")
 
-            kws = extract_keywords(f"{title} {desc}")
-            key = clean_company_name(co_name)
-            if not key:
-                continue
+                full = f"{title} {desc}"
+                if state_name not in full.lower() and state not in full:
+                    continue
+                if not is_relevant(full):
+                    continue
 
-            sig = LiveSignal(
-                company_name=co_name,
-                source_url=f"https://www.google.com/search?q={quote_plus(co_name+' jobs')}",
-                source_type="serpapi_jobs",
-                date_found=datetime.utcnow().strftime("%Y-%m-%d"),
-                signal_type="hiring",
-                raw_snippet=f"{title} | {co_name} | {location}",
-                extracted_keywords=kws or [query.split()[0].lower()],
-                confidence_score=0.88,
-                state_detected=sig_state,
-                city_detected=detect_city(location),
-                likely_buyer_function="DBA/DBRE",
-                enterprise_relevance_score=enterprise_relevance(kws),
-                live_collected=True,
-                source_access_status="success",
-                parser_used="serpapi_json",
-                extraction_method="structured_api",
-                data_source="LIVE",
-            )
+                meta["relevant_items"] += 1
+                companies = _extract_companies(full)
+                if not companies:
+                    continue
 
-            if key not in discovered:
-                discovered[key] = DiscoveredCompany(
-                    name=co_name,
-                    hq_state=sig_state,
-                    hq_city=detect_city(location),
-                    discovery_source="serpapi_jobs",
-                    confidence=0.88,
-                )
-            discovered[key].signals.append(sig)
+                kws       = extract_keywords(full)
+                sig_state = detect_state(full) or state
 
-            if len(discovered) >= max_companies:
-                break
+                tl = title.lower()
+                if any(x in tl for x in ["cio","cto","appoint","named","hired as","joins as"]):
+                    sig_type = "leadership_change"
+                elif any(x in tl for x in ["acqui","merger","merges","acquires"]):
+                    sig_type = "ma_event"
+                elif any(x in tl for x in ["migrat","transform","modern","cloud"]):
+                    sig_type = "modernization"
+                elif any(x in tl for x in ["outage","incident","downtime","fail"]):
+                    sig_type = "outage"
+                elif any(x in tl for x in ["oracle","database","dba"]):
+                    sig_type = "oracle_pain"
+                else:
+                    sig_type = "announcement"
+
+                for co_name in companies[:2]:
+                    key = _clean_name(co_name)
+                    if not key:
+                        continue
+
+                    sig = LiveSignal(
+                        company_name=co_name,
+                        source_url=link,
+                        source_type=feed_type,
+                        date_found=pub_date,
+                        signal_type=sig_type,
+                        raw_snippet=f"{title} | {desc[:200]}",
+                        extracted_keywords=kws,
+                        confidence_score=0.72,
+                        state_detected=sig_state,
+                        city_detected=detect_city(full),
+                        enterprise_relevance_score=0.65,
+                        live_collected=True,
+                        source_access_status="success",
+                        parser_used="rss_xml",
+                        extraction_method="rss_feed",
+                        data_source="LIVE",
+                    )
+
+                    if key not in discovered:
+                        discovered[key] = DiscoveredCompany(
+                            name=co_name, hq_state=sig_state,
+                            hq_city=detect_city(full),
+                            discovery_source=feed_type, confidence=0.72,
+                        )
+                    discovered[key].signals.append(sig)
+
+                    if len(discovered) >= max_companies:
+                        break
+
+        except Exception as e:
+            meta["errors"].append(f"{feed_name}: {str(e)[:60]}")
+            logger.warning(f"[RSS/{feed_name}] Parse error: {e}")
 
         if len(discovered) >= max_companies:
             break
-        time.sleep(0.5)
+        time.sleep(0.3)
 
     meta["companies_found"] = len(discovered)
-    logger.info(f"[SerpAPI] {state}: {len(discovered)} companies")
+    logger.info(f"[RSS] {state}: {len(discovered)} companies from "
+               f"{meta['feeds_ok']}/{meta['feeds_tried']} feeds")
     return list(discovered.values())[:max_companies], meta
 
 
 # ════════════════════════════════════════════════════════════════════
-# SOURCE 5: BING SEARCH  ✅ Paid key, very AWS-friendly
+# SIGNAL ENRICHMENT — targeted NewsAPI fetch per discovered company
 # ════════════════════════════════════════════════════════════════════
 
-BING_QUERY_TEMPLATES = [
-    'site:linkedin.com OR site:glassdoor.com "Oracle DBA" "{state_name}"',
-    '"Oracle database" "{state_name}" enterprise company',
-    '"CIO appointed" OR "CTO named" "{state_name}" 2025 OR 2026',
-    '"database migration" "{state_name}" enterprise',
-]
+def enrich_company_signals(company_name: str, newsapi_key: str) -> List[LiveSignal]:
+    """Fetch targeted Oracle/CIO/M&A signals for a specific company via NewsAPI."""
+    if not newsapi_key:
+        return []
 
-
-def discover_from_bing(state: str, api_key: str,
-                        max_companies: int = 25) -> Tuple[List[DiscoveredCompany], dict]:
-    """
-    ✅ RELIABLE WITH KEY — Bing Web Search API.
-    ~$3-7/1000 queries. Returns structured web results.
-    Works perfectly from AWS (Microsoft cloud).
-    Add as BING_API_KEY in Streamlit secrets.
-    Azure portal: cognitive-services/bing/web-search
-    """
-    meta = {
-        "source":          "bing_search",
-        "queries_run":     0,
-        "raw_results":     0,
-        "companies_found": 0,
-        "error":           None,
-    }
-    if not api_key:
-        meta["error"] = "no_key"
-        return [], meta
-
-    state_name = STATE_NAMES.get(state, state)
-    discovered: Dict[str, DiscoveredCompany] = {}
-
-    for tmpl in BING_QUERY_TEMPLATES[:3]:
-        query = tmpl.format(state_name=state_name)
-        url   = f"https://api.bing.microsoft.com/v7.0/search?q={quote_plus(query)}&count=20&mkt=en-US"
-
-        data = fetch_json(
-            url, source_name="bing_search",
-            # Bing requires the key in a header, not query param
-            # fetch_json doesn't support custom headers — use requests directly
-        )
-
-        # Since fetch_json doesn't pass headers, use direct requests for Bing
-        import requests as _req
-        meta["queries_run"] += 1
-        try:
-            r = _req.get(
-                url,
-                headers={
-                    "Ocp-Apim-Subscription-Key": api_key,
-                    "User-Agent": "TessellSignalEngine/2.0",
-                },
-                timeout=10,
-            )
-            if r.status_code != 200:
-                meta["error"] = f"HTTP {r.status_code}"
-                logger.warning(f"[Bing] HTTP {r.status_code}: {r.text[:100]}")
-                continue
-            data = r.json()
-        except Exception as e:
-            meta["error"] = str(e)
-            logger.warning(f"[Bing] Request error: {e}")
+    additional = []
+    for query in [
+        f'"{company_name}" Oracle database OR "database migration"',
+        f'"{company_name}" CIO OR CTO OR "cloud migration" OR acquisition',
+    ][:2]:
+        url  = (f"https://newsapi.org/v2/everything"
+                f"?q={quote_plus(query)}&language=en"
+                f"&sortBy=publishedAt&pageSize=5&apiKey={newsapi_key}")
+        data = fetch_json(url, source_name="newsapi_enrichment")
+        if not data or data.get("status") == "error":
             continue
 
-        results = (data.get("webPages") or {}).get("value", [])
-        meta["raw_results"] += len(results)
-        logger.info(f"[Bing] '{query[:50]}': {len(results)} results")
+        for article in data.get("articles",[])[:3]:
+            title = (article.get("title")       or "").strip()
+            desc  = (article.get("description") or "").strip()
+            url_a = (article.get("url")         or "")
+            pub   = (article.get("publishedAt") or "")[:10]
 
-        for result in results:
-            name_r  = result.get("name","")
-            snippet = result.get("snippet","")
-            url_r   = result.get("url","")
-            full    = f"{name_r} {snippet}"
-
+            full  = f"{title} {desc}"
             if not is_relevant(full):
                 continue
 
-            companies = extract_companies_from_text(full)
-            kws       = extract_keywords(full)
-            sig_state = detect_state(full) or state
-
-            tl = full.lower()
-            if any(x in tl for x in ["appoint","named","cio","cto","hire"]):
-                sig_type = "timing"
-            elif any(x in tl for x in ["migrat","transform","modern"]):
-                sig_type = "transformation"
+            kws   = extract_keywords(full)
+            tl    = title.lower()
+            if any(x in tl for x in ["cio","cto","appoint","named"]):
+                sig_type = "leadership_change"
+            elif any(x in tl for x in ["acqui","merger"]):
+                sig_type = "ma_event"
             else:
-                sig_type = "pain"
+                sig_type = "oracle_pain"
 
-            for co_name in companies[:2]:
-                key = clean_company_name(co_name)
-                if not key or len(key) < 2:
-                    continue
+            sig = LiveSignal(
+                company_name=company_name,
+                source_url=url_a,
+                source_type="newsapi",
+                date_found=pub or datetime.utcnow().strftime("%Y-%m-%d"),
+                signal_type=sig_type,
+                raw_snippet=f"{title} | {desc[:200]}",
+                extracted_keywords=kws,
+                confidence_score=0.80,
+                state_detected=None,
+                enterprise_relevance_score=0.72,
+                live_collected=True,
+                source_access_status="success",
+                parser_used="newsapi_json",
+                extraction_method="structured_api",
+                data_source="LIVE",
+            )
+            additional.append(sig)
+        time.sleep(0.2)
 
-                sig = LiveSignal(
-                    company_name=co_name,
-                    source_url=url_r,
-                    source_type="bing_search",
-                    date_found=datetime.utcnow().strftime("%Y-%m-%d"),
-                    signal_type=sig_type,
-                    raw_snippet=f"{name_r} | {snippet[:200]}",
-                    extracted_keywords=kws,
-                    confidence_score=0.70,
-                    state_detected=sig_state,
-                    enterprise_relevance_score=enterprise_relevance(kws),
-                    live_collected=True,
-                    source_access_status="success",
-                    parser_used="bing_json",
-                    extraction_method="structured_api",
-                    data_source="LIVE",
-                )
-
-                if key not in discovered:
-                    discovered[key] = DiscoveredCompany(
-                        name=co_name,
-                        hq_state=sig_state,
-                        discovery_source="bing_search",
-                        confidence=0.70,
-                    )
-                discovered[key].signals.append(sig)
-                if len(discovered) >= max_companies:
-                    break
-        if len(discovered) >= max_companies:
-            break
-        time.sleep(0.5)
-
-    meta["companies_found"] = len(discovered)
-    return list(discovered.values())[:max_companies], meta
+    return additional
 
 
 # ════════════════════════════════════════════════════════════════════
-# SOURCE 6: STATE SEED LIST  — guaranteed enterprise anchors
+# SEED LIST — separate from live rankings per spec
 # ════════════════════════════════════════════════════════════════════
 
-STATE_ENTERPRISE_SEEDS: Dict[str, List[str]] = {
+STATE_SEED_LIST: Dict[str, List[str]] = {
     "TX": [
         "AT&T","ExxonMobil","McKesson","American Airlines","Southwest Airlines",
         "Texas Instruments","Dell Technologies","Energy Transfer","Kimberly-Clark",
-        "ConocoPhillips","Phillips 66","Tenet Healthcare","Celanese","Fluor",
-        "Vistra","NRG Energy","Flowserve","HollyFrontier","USAA",
-        "Whole Foods Market","7-Eleven","GameStop","iHeartMedia","Match Group",
-        "Toyota Motor North America","Jacobs Engineering","Neiman Marcus",
-        "Commercial Metals","Pioneer Natural Resources","Atmos Energy",
+        "ConocoPhillips","Phillips 66","Tenet Healthcare","Fluor","Vistra",
+        "NRG Energy","USAA","Whole Foods Market","7-Eleven","iHeartMedia",
+        "Toyota Motor North America","Jacobs Engineering","Atmos Energy",
     ],
-    "OK": [
-        "ONEOK","Devon Energy","Chesapeake Energy","Williams Companies",
-        "BOK Financial","Mach Natural Resources","Alliance Resource Partners",
-        "OGE Energy","Helmerich & Payne","Unit Corp","Matrix Service",
-        "American Fidelity","Vast Bank","Enable Midstream","SemGroup",
-    ],
-    "KS": [
-        "Spirit AeroSystems","Evergy","Garmin","Security Benefit",
-        "Kansas City Life Insurance","Seaboard","Cerner","H&R Block",
-        "YRC Worldwide","INTRUST Bank","CoreFirst Bank","CommunityAmerica",
-        "Westar Energy","Payless ShoeSource",
-    ],
-    "AR": [
-        "Walmart","J.B. Hunt","Dillard's","Murphy Oil","Axiom",
-        "Stephens Inc","ArcBest","USA Truck","Acxiom","Hunt Oil",
-    ],
-    "MO": [
-        "Emerson Electric","Edward Jones","Centene","Peabody Energy",
-        "Graybar Electric","Stifel Financial","World Wide Technology",
-        "Mastercard","Leidos Holdings","Maritz Holdings","Ameren",
-    ],
-    "CO": [
-        "Newmont","DaVita","Arrow Electronics","Ball Corp",
-        "Dish Network","Centura Health","Level 3 Communications",
-        "Envision Healthcare","ReadyTalk","DigitalBridge",
-    ],
-    "TN": [
-        "HCA Healthcare","FedEx","Dollar General","AutoZone","Unum Group",
-        "Bridgestone Americas","Community Health Systems","Tractor Supply",
-        "Thomas & Betts","Genesco",
-    ],
-    "IN": [
-        "Cummins","Eli Lilly","Indiana University Health","Salesforce",
-        "OneAmerica","Anthem","Roche Diagnostics","Rolls-Royce Americas",
-        "Steel Technologies","Simon Property Group",
-    ],
-    "MN": [
-        "UnitedHealth Group","Target","Best Buy","3M","General Mills",
-        "US Bancorp","Xcel Energy","Ameriprise Financial","Toro",
-        "Ecolab","Nuveen","Land O Lakes",
-    ],
-    "LA": [
-        "Entergy","CenturyLink","Ochsner Health","Turner Industries",
-        "Lamar Advertising","IberiaBank","Stone Energy","Tidewater",
-    ],
-    "AZ": [
-        "Avnet","Microchip Technology","Freeport-McMoRan","Insight Direct",
-        "PetSmart","Banner Health","Viad","Republic Services","ON Semiconductor",
-    ],
-    "NM": [
-        "PNM Resources","Presbyterian Healthcare","Intel New Mexico",
-        "Sandia National Laboratories","Lovelace Health System",
-    ],
+    "OK": ["ONEOK","Devon Energy","Chesapeake Energy","Williams Companies",
+           "BOK Financial","OGE Energy","Helmerich & Payne"],
+    "KS": ["Spirit AeroSystems","Evergy","Garmin","Seaboard","INTRUST Bank"],
+    "AR": ["Walmart","J.B. Hunt","Dillard's","Murphy Oil","ArcBest"],
+    "MO": ["Emerson Electric","Edward Jones","Centene","Mastercard"],
+    "TN": ["HCA Healthcare","FedEx","Dollar General","AutoZone","Unum Group"],
+    "IN": ["Cummins","Eli Lilly","Salesforce","OneAmerica"],
+    "MN": ["UnitedHealth Group","Target","Best Buy","3M","General Mills","US Bancorp"],
+    "CO": ["Newmont","DaVita","Arrow Electronics","Ball Corp"],
+    "LA": ["Entergy","Ochsner Health"],
+    "AZ": ["Avnet","Microchip Technology","Freeport-McMoRan"],
+    "NM": ["PNM Resources","Intel New Mexico"],
 }
 
 
-def discover_from_seeds(state: str) -> List[DiscoveredCompany]:
-    seeds = STATE_ENTERPRISE_SEEDS.get(state, [])
-    result = []
-    for name in seeds:
-        result.append(DiscoveredCompany(
-            name=name,
-            hq_state=state,
-            is_public=True,
-            discovery_source="state_seed_list",
-            confidence=0.95,
+def get_seed_list(state: str) -> List[DiscoveredCompany]:
+    """
+    Returns known Fortune-tier anchors. Per spec: SEPARATE LIST from live rankings.
+    Seeds have discovery_source='seed_list' for clear labeling.
+    They never rank against live-signal companies.
+    """
+    seeds = []
+    for name in STATE_SEED_LIST.get(state, []):
+        seeds.append(DiscoveredCompany(
+            name=name, hq_state=state, is_public=True,
+            discovery_source="seed_list", confidence=0.95,
         ))
-    logger.info(f"[Seeds] {state}: {len(result)} known enterprise anchors")
-    return result
+    logger.info(f"[Seeds] {state}: {len(seeds)} known enterprise anchors")
+    return seeds
 
 
 # ════════════════════════════════════════════════════════════════════
-# DEDUPLICATION
+# DEDUP
 # ════════════════════════════════════════════════════════════════════
 
-def _fuzzy_dedup(discovered: Dict[str, DiscoveredCompany]) -> List[DiscoveredCompany]:
-    """
-    Merge entries that look like the same company.
-    'ONEOK Inc' + 'ONEOK' → keep the one with more signals, merge signals.
-    """
-    values = list(discovered.values())
+def _fuzzy_dedup(disc: Dict[str, DiscoveredCompany]) -> List[DiscoveredCompany]:
+    values  = list(disc.values())
     merged: List[DiscoveredCompany] = []
     used:   Set[int] = set()
-
     for i, co in enumerate(values):
         if i in used:
             continue
-        base  = clean_company_name(co.name)
+        base  = _clean_name(co.name)
         group = [co]
         for j, other in enumerate(values):
             if j <= i or j in used:
                 continue
-            other_base = clean_company_name(other.name)
-            if ((base in other_base or other_base in base)
-                    and abs(len(base) - len(other_base)) <= 10):
+            ob = _clean_name(other.name)
+            if (base in ob or ob in base) and abs(len(base) - len(ob)) <= 10:
                 group.append(other)
                 used.add(j)
         used.add(i)
-
         best = max(group, key=lambda c: len(c.signals))
         for other in group:
             if other is not best:
@@ -1179,8 +681,94 @@ def _fuzzy_dedup(discovered: Dict[str, DiscoveredCompany]) -> List[DiscoveredCom
                 if other.discovery_source not in best.discovery_source:
                     best.discovery_source += f"+{other.discovery_source}"
         merged.append(best)
-
     return merged
+
+
+# ════════════════════════════════════════════════════════════════════
+# CLASSIFICATION HELPERS (used by streamlit_app.py)
+# ════════════════════════════════════════════════════════════════════
+
+def classify_discovery_type(discovery_source: str) -> str:
+    sources  = set(s.strip() for s in discovery_source.split("+") if s.strip())
+    has_seed = "seed_list" in sources
+    has_live = bool(sources - {"seed_list"})
+    if has_seed and has_live:
+        return "mixed_source"
+    if has_seed:
+        return "seed_list"
+    return "live_discovered"
+
+
+def why_discovered(discovery_source: str, signals: list) -> str:
+    sources = set(s.strip() for s in discovery_source.split("+") if s.strip())
+    reasons = []
+    if "sec_edgar"         in sources: reasons.append("SEC 10-K/10-Q: Oracle/DB mention")
+    if "newsapi"           in sources: reasons.append("NewsAPI: leadership/M&A/modernization")
+    if "reuters_rss"       in sources: reasons.append("Reuters business news")
+    if "marketwatch_rss"   in sources: reasons.append("MarketWatch")
+    if "prnewswire_rss"    in sources: reasons.append("PR Newswire")
+    if "businesswire_rss"  in sources: reasons.append("BusinessWire")
+    if "globenewswire_rss" in sources: reasons.append("GlobeNewswire IT")
+    if "seed_list"         in sources: reasons.append("Known enterprise anchor (seed)")
+    return "; ".join(reasons) if reasons else "live discovery"
+
+
+def tessell_relevance_reason(company_name: str, industry: str, signals: list) -> str:
+    ind_lower = (industry or "").lower()
+
+    INDUSTRY_NARRATIVES = {
+        "airline":        "24/7 Oracle reservation + loyalty systems — known DB complexity",
+        "airlines":       "24/7 Oracle reservation + loyalty systems — known DB complexity",
+        "hospital":       "Oracle/EHR systems with HIPAA DR requirements — high DBA toil",
+        "healthcare":     "Healthcare Oracle footprint + DR/HA compliance requirements",
+        "banking":        "Core banking Oracle/SQL, 24/7 SLA, regulatory compliance",
+        "financial":      "Financial Oracle dependency + audit/compliance pressure",
+        "insurance":      "Policy/claims Oracle — DBA overhead and provisioning pain",
+        "energy":         "SAP/Oracle ERP + SCADA + multi-region DR",
+        "oil":            "Oracle ERP — DBA toil and DR needs",
+        "midstream":      "Oracle ERP — pipeline management DB complexity",
+        "telecom":        "Billing/BSS on Oracle — highest DB complexity",
+        "telecommunications": "OSS/BSS Oracle stack — DBA toil, strong Tessell fit",
+        "manufacturing":  "Oracle/SAP ERP — non-prod provisioning delays",
+        "automotive":     "Oracle ERP + supply chain DB complexity",
+        "logistics":      "WMS/TMS Oracle stack — DR requirements, multi-region",
+        "pharmaceutical": "Oracle ERP + GxP validation + DR requirements",
+        "defense":        "Oracle ERP + FedRAMP/security compliance",
+        "retail":         "Oracle/SAP ERP + seasonal scaling + DR",
+    }
+
+    base = next(
+        (v for k, v in INDUSTRY_NARRATIVES.items() if k in ind_lower), None
+    )
+
+    if not signals:
+        return base or "Enterprise-qualified — no live signals yet"
+
+    kws: Set[str] = set()
+    for s in signals:
+        extracted = (s.extracted_keywords if hasattr(s, "extracted_keywords")
+                     else s.get("extracted_keywords", []))
+        kws.update(k.lower() for k in extracted)
+
+    parts = []
+    if kws & {"oracle","oracle dba","oracle rac","oracle exadata","oracle licensing"}:
+        hit = kws & {"oracle dba","oracle rac","oracle exadata","oracle licensing","oracle"}
+        parts.append(f"Oracle footprint: {', '.join(sorted(hit)[:2])}")
+    if kws & {"database administrator","dba","database reliability","dbre","oracle dba"}:
+        hit = kws & {"oracle dba","database administrator","dba","dbre"}
+        parts.append(f"DB/SRE hiring: {', '.join(sorted(hit)[:2])}")
+    if kws & {"cloud migration","oracle migration","database migration","data center exit"}:
+        hit = kws & {"oracle migration","cloud migration","database migration","data center exit"}
+        parts.append(f"Migration: {', '.join(sorted(hit)[:2])}")
+    if kws & {"acquisition","merger","new cio","new cto"}:
+        hit = kws & {"acquisition","merger","new cio","new cto"}
+        parts.append(f"Timing trigger: {', '.join(sorted(hit)[:2])}")
+
+    if parts:
+        prefix = (base.split("—")[0].strip() + " — ") if base else ""
+        return prefix + "; ".join(parts)
+
+    return base or "Enterprise signals detected"
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -1188,127 +776,100 @@ def _fuzzy_dedup(discovered: Dict[str, DiscoveredCompany]) -> List[DiscoveredCom
 # ════════════════════════════════════════════════════════════════════
 
 def discover_territory(
-    state:           str,
-    max_companies:   int            = 50,
-    include_seeds:   bool           = True,
-    newsapi_key:     Optional[str]  = None,
-    serpapi_key:     Optional[str]  = None,
-    bing_api_key:    Optional[str]  = None,
+    state:        str,
+    max_companies: int           = 50,
+    include_seeds: bool          = True,
+    newsapi_key:   Optional[str] = None,
+    serpapi_key:   Optional[str] = None,   # not used (not in spec)
+    bing_api_key:  Optional[str] = None,   # not used (not in spec)
 ) -> dict:
     """
-    Main entry point. Runs all available structured sources for a state.
-    Returns deduplicated DiscoveredCompany list with signals attached.
-
-    Sources run in reliability order. Paid sources (SerpAPI, Bing) run
-    last so free sources always run even if keys are missing.
+    Main entry point. Runs all Phase 1 primary sources.
+    Returns live-discovered companies and seed list separately.
     """
-    all_discovered:    Dict[str, DiscoveredCompany] = {}
-    source_counts:     Dict[str, int]               = {}
-    source_meta:       Dict[str, dict]               = {}
+    live:         Dict[str, DiscoveredCompany] = {}
+    source_counts: Dict[str, int]              = {}
+    source_meta:   Dict[str, dict]             = {}
 
-    # 1. Seeds — always first, guaranteed baseline
-    if include_seeds:
-        seeds = discover_from_seeds(state)
-        for co in seeds:
-            key = clean_company_name(co.name)
-            if key:
-                all_discovered[key] = co
-        source_counts["state_seeds"] = len(seeds)
-        source_meta["state_seeds"]   = {"source":"state_seed_list","accepted":len(seeds)}
-
-    # 2. SEC EDGAR — public companies, direct company names
+    # SOURCE 1: SEC EDGAR
     edgar_cos, edgar_meta = discover_from_edgar(state, max_companies=25)
     for co in edgar_cos:
-        key = clean_company_name(co.name)
+        key = _clean_name(co.name)
         if key:
-            if key in all_discovered:
-                all_discovered[key].signals.extend(co.signals)
-                all_discovered[key].is_public = True
-                if co.ticker and not all_discovered[key].ticker:
-                    all_discovered[key].ticker = co.ticker
-                if "sec_edgar" not in all_discovered[key].discovery_source:
-                    all_discovered[key].discovery_source += "+sec_edgar"
+            if key in live:
+                live[key].signals.extend(co.signals)
+                live[key].is_public = True
+                if "sec_edgar" not in live[key].discovery_source:
+                    live[key].discovery_source += "+sec_edgar"
             else:
-                all_discovered[key] = co
+                live[key] = co
     source_counts["sec_edgar"] = edgar_meta["accepted"]
     source_meta["sec_edgar"]   = edgar_meta
 
-    # 3. GDELT — news-based, no auth
-    gdelt_cos, gdelt_meta = discover_from_gdelt(state, max_companies=30)
-    for co in gdelt_cos:
-        key = clean_company_name(co.name)
-        if key:
-            if key in all_discovered:
-                all_discovered[key].signals.extend(co.signals)
-                if "gdelt" not in all_discovered[key].discovery_source:
-                    all_discovered[key].discovery_source += "+gdelt"
-            else:
-                all_discovered[key] = co
-    source_counts["gdelt"] = gdelt_meta["companies_found"]
-    source_meta["gdelt"]   = gdelt_meta
-
-    # 4. NewsAPI — free key
+    # SOURCE 2: NEWSAPI
     if newsapi_key:
         newsapi_cos, newsapi_meta = discover_from_newsapi(state, newsapi_key, 25)
         for co in newsapi_cos:
-            key = clean_company_name(co.name)
+            key = _clean_name(co.name)
             if key:
-                if key in all_discovered:
-                    all_discovered[key].signals.extend(co.signals)
-                    if "newsapi" not in all_discovered[key].discovery_source:
-                        all_discovered[key].discovery_source += "+newsapi"
+                if key in live:
+                    live[key].signals.extend(co.signals)
+                    if "newsapi" not in live[key].discovery_source:
+                        live[key].discovery_source += "+newsapi"
                 else:
-                    all_discovered[key] = co
+                    live[key] = co
         source_counts["newsapi"] = newsapi_meta["companies_found"]
         source_meta["newsapi"]   = newsapi_meta
+    else:
+        source_counts["newsapi"] = 0
+        source_meta["newsapi"]   = {
+            "source": "newsapi",
+            "error":  "no_key — add NEWSAPI_KEY to Streamlit secrets (free at newsapi.org)",
+            "accepted": 0,
+        }
 
-    # 5. SerpAPI — paid, best job coverage
-    if serpapi_key:
-        serp_cos, serp_meta = discover_from_serpapi(state, serpapi_key, 30)
-        for co in serp_cos:
-            key = clean_company_name(co.name)
-            if key:
-                if key in all_discovered:
-                    all_discovered[key].signals.extend(co.signals)
-                    if "serpapi_jobs" not in all_discovered[key].discovery_source:
-                        all_discovered[key].discovery_source += "+serpapi_jobs"
-                else:
-                    all_discovered[key] = co
-        source_counts["serpapi_jobs"] = serp_meta["companies_found"]
-        source_meta["serpapi_jobs"]   = serp_meta
+    # SOURCE 3: RSS FEEDS
+    rss_cos, rss_meta = discover_from_rss(state, max_companies=25)
+    for co in rss_cos:
+        key = _clean_name(co.name)
+        if key:
+            if key in live:
+                live[key].signals.extend(co.signals)
+                if co.discovery_source not in live[key].discovery_source:
+                    live[key].discovery_source += f"+{co.discovery_source}"
+            else:
+                live[key] = co
+    source_counts["rss_feeds"] = rss_meta["companies_found"]
+    source_meta["rss_feeds"]   = rss_meta
 
-    # 6. Bing Search — paid
-    if bing_api_key:
-        bing_cos, bing_meta = discover_from_bing(state, bing_api_key, 25)
-        for co in bing_cos:
-            key = clean_company_name(co.name)
-            if key:
-                if key in all_discovered:
-                    all_discovered[key].signals.extend(co.signals)
-                    if "bing_search" not in all_discovered[key].discovery_source:
-                        all_discovered[key].discovery_source += "+bing_search"
-                else:
-                    all_discovered[key] = co
-        source_counts["bing_search"] = bing_meta["companies_found"]
-        source_meta["bing_search"]   = bing_meta
+    # SIGNAL ENRICHMENT — targeted NewsAPI per discovered company
+    if newsapi_key:
+        for key, co in list(live.items())[:15]:
+            extra = enrich_company_signals(co.name, newsapi_key)
+            if extra:
+                co.signals.extend(extra)
 
-    # Dedup
-    before_dedup       = len(all_discovered)
-    deduped            = _fuzzy_dedup(all_discovered)
+    # DEDUP
+    before_dedup       = len(live)
+    deduped            = _fuzzy_dedup(live)
     duplicates_removed = before_dedup - len(deduped)
 
+    # SEEDS — separate list per spec
+    seeds = get_seed_list(state) if include_seeds else []
+
     logger.info(
-        f"[Discovery] {state}: {before_dedup} raw → "
-        f"{duplicates_removed} deduped → {len(deduped)} unique | "
-        f"sources: {source_counts}"
+        f"[Discovery] {state}: {len(deduped)} live + {len(seeds)} seeds | "
+        f"sources={source_counts}"
     )
 
     return {
-        "state":             state,
-        "total_found":       len(deduped),
-        "before_dedup":      before_dedup,
-        "duplicates_removed":duplicates_removed,
-        "source_counts":     source_counts,
-        "source_meta":       source_meta,
-        "companies":         deduped,
+        "state":              state,
+        "companies":          deduped,    # live-discovered only
+        "seed_companies":     seeds,      # separate per spec
+        "total_live":         len(deduped),
+        "total_seeds":        len(seeds),
+        "before_dedup":       before_dedup,
+        "duplicates_removed": duplicates_removed,
+        "source_counts":      source_counts,
+        "source_meta":        source_meta,
     }
