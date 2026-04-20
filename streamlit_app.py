@@ -188,7 +188,7 @@ with st.sidebar:
 
     st.markdown("---")
     st.markdown('<div style="font-size:0.68rem;color:#6E7681;text-transform:uppercase;letter-spacing:0.1em;margin-bottom:8px;">Quick Filters</div>', unsafe_allow_html=True)
-    preset_choice = st.selectbox("", ["— choose —"] + list(PRESET_FILTERS.keys()), label_visibility="collapsed")
+    preset_choice = st.selectbox("Quick Filters", ["— choose —"] + list(PRESET_FILTERS.keys()), label_visibility="collapsed")
     st.markdown("---")
     st.markdown('<div style="font-size:0.68rem;color:#6E7681;text-transform:uppercase;letter-spacing:0.1em;margin-bottom:8px;">Manual Filters</div>', unsafe_allow_html=True)
     heat_options = ["HOT","WARM","WATCHLIST","SIGNAL PENDING","BASE FIT ONLY"]
